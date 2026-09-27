@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - {{ app_name }}</title>
+    <link rel="stylesheet" href="/static/style.css?v=2">
+    <!-- admin.css is additive only: gives us .settings-grid / .settings-card and the ticket status badges -->
+    <link rel="stylesheet" href="/static/admin/admin.css?v=1">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .field-hint { font-size: 12px; color: var(--text-light); margin-top: 6px; }
+        .ticket-hint { font-size: 13px; color: var(--text-secondary); margin: -8px 0 18px; line-height: 1.5; }
+        .char-count { font-size: 12px; color: var(--text-light); text-align: right; margin-top: 6px; }
+        .char-count.near-limit { color: #D68F35; }
+
+        .tickets-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+        .tickets-head h3 { margin-bottom: 0; }
+        .tickets-refresh { background: none; border: none; cursor: pointer; color: var(--text-secondary); font-size: 14px; padding: 6px 8px; border-radius: 8px; }
+        .tickets-refresh:hover { background: var(--accent-tint); color: var(--medical-green); }
+
+        .tickets-list { display: flex; flex-direction: column; gap: 12px; max-height: 480px; overflow-y: auto; padding-right: 4px; }
+        .ticket-item { border: var(--border-hairline); border-radius: 12px; padding: 14px 16px; background: var(--surface); }
+        .ticket-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+        .ticket-subject { font-size: 14px; font-weight: 600; color: var(--text-primary); word-break: break-word; }
+        .ticket-time { font-size: 12px; color: var(--text-light); margin-top: 3px; }
+        .ticket-message { font-size: 13px; color: var(--text-secondary); margin-top: 10px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+        .ticket-reply { margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: var(--accent-tint); border-left: 3px solid var(--medical-green); }
+        .ticket-reply-label { font-size: 12px; font-weight: 600; color: var(--medical-green); margin-bottom: 4px; }
+        .ticket-reply-text { font-size: 13px; color: var(--text-primary); line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+        .tickets-empty { text-align: center; padding: 36px 12px; color: var(--text-light); font-size: 14px; }
+        .tickets-empty i { display: block; font-size: 28px; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar glass-effect">
+            <div class="sidebar-header">
+                <div class="logo-container">
+                    <img class="logo-icon" src="/assets/logo.png?v=2" alt="MedNova logo" width="44" height="44">
+                    <div class="logo-text">
+                        <span class="logo-title">MedNova</span>
+                        <span class="logo-subtitle">Therapy System</span>
+                    </div>
+                </div>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="/dashboard" class="nav-item"><i class="fas fa-th-large"></i><span>Dashboard</span></a>
+                <a href="/patients"  class="nav-item"><i class="fas fa-users"></i><span>Patients</span></a>
+                <a href="/session"   class="nav-item"><i class="fas fa-video"></i><span>Start Session</span></a>
+                <a href="/reports"   class="nav-item"><i class="fas fa-file-alt"></i><span>Reports</span></a>
+                <a href="/analytics" class="nav-item"><i class="fas fa-chart-line"></i><span>Analysis</span></a>
+                <a href="/settings"  class="nav-item active"><i class="fas fa-cog"></i><span>Settings</span></a>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="status-indicator">
+                    <span class="status-dot online"></span>
+                    <span class="status-text">{{ user.full_name }}</span>
+                </div>
+                <div class="version-info">{{ user.role|capitalize }}</div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <header class="top-bar glass-effect">
+                <div class="top-bar-left">
+                    <button class="menu-toggle" id="menuToggle"><i class="fas fa-bars"></i></button>
+                    <div class="breadcrumb">
+                        <span>Home</span>
+                        <i class="fas fa-chevron-right"></i>
+                        <span class="active">Settings</span>
+                    </div>
+                </div>
+                <div class="top-bar-right">
+                    <button class="logout-btn" onclick="handleLogout()">
+                        <i class="fas fa-sign-out-alt"></i>
+                    </button>
+                </div>
+            </header>
+
+            <div class="content-area">
+                <div class="header-left" style="margin-bottom:8px;">
+                    <h2>Settings</h2>
+                    <div class="header-subtitle">Manage your profile, or raise a ticket and the admin will get it right away.</div>
+                </div>
+
+                <!-- Profile -->
+                <div class="settings-section">
+                    <div class="settings-section-title">Profile</div>
+                    <div class="settings-grid settings-grid-single">
+                        <div class="settings-card glass-effect">
+                            <h3><i class="fas fa-user-md"></i> Profile Details</h3>
+                            <form id="profileForm" onsubmit="submitProfile(event)">
+                                <div class="settings-form-row" style="margin-bottom:16px;">
+                                    <div class="form-group">
+                                        <label for="p_full_name">Full Name</label>
+                                        <input type="text" id="p_full_name" class="form-input" maxlength="100" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="p_email">Email</label>
+                                        <input type="text" id="p_email" class="form-input" disabled>
+                                    </div>
+                                </div>
+                                <div class="settings-form-row" style="margin-bottom:16px;">
+                                    <div class="form-group">
+                                        <label for="p_phone">Phone</label>
+                                        <input type="text" id="p_phone" class="form-input" maxlength="20" placeholder="Optional">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="p_role">Role</label>
+                                        <input type="text" id="p_role" class="form-input" disabled>
+                                    </div>
+                                </div>
+                                <div class="form-group" style="margin-bottom:8px;">
+                                    <label for="p_specialization">Specialization</label>
+                                    <input type="text" id="p_specialization" class="form-input" maxlength="100" placeholder="Optional">
+                                </div>
+                                <div class="field-hint" style="margin-bottom:20px;">Email and role can only be changed by an admin.</div>
+                                <button type="submit" class="btn-primary" id="profileSubmitBtn">
+                                    <i class="fas fa-save"></i> Save Profile
+                                </button>
+                            </form>
+
+                            <!-- Read-only account info, folded into the same card -->
+                            <div class="settings-account-strip" id="accountInfo">
+                                <span><i class="fas fa-spinner fa-spin"></i> Loading...</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Support -->
+                <div class="settings-section">
+                    <div class="settings-section-title">Support</div>
+                    <div class="settings-grid">
+                        <!-- Raise a ticket -->
+                        <div class="settings-card glass-effect">
+                            <h3><i class="fas fa-life-ring"></i> Raise a Ticket</h3>
+                            <p class="ticket-hint">Describe the issue or request. It goes straight to the admin's ticket queue, and any reply shows up under <b>My Tickets</b>.</p>
+                            <form id="ticketForm" onsubmit="submitTicket(event)">
+                                <div class="form-group" style="margin-bottom:16px;">
+                                    <label for="tk_subject">Subject</label>
+                                    <input type="text" id="tk_subject" class="form-input" maxlength="150" required
+                                           placeholder="e.g. Camera not detected in session">
+                                </div>
+                                <div class="form-group" style="margin-bottom:20px;">
+                                    <label for="tk_message">Description</label>
+                                    <textarea id="tk_message" class="form-input" rows="7" maxlength="5000" required
+                                              placeholder="What happened? What were you doing when it happened?"></textarea>
+                                    <div class="char-count" id="tk_count">0 / 5000</div>
+                                </div>
+                                <button type="submit" class="btn-primary" id="ticketSubmitBtn">
+                                    <i class="fas fa-paper-plane"></i> Submit Ticket
+                                </button>
+                            </form>
+                        </div>
+
+                        <!-- My tickets -->
+                        <div class="settings-card glass-effect">
+                            <div class="tickets-head">
+                                <h3><i class="fas fa-ticket-alt"></i> My Tickets</h3>
+                                <button class="tickets-refresh" onclick="loadTickets()" title="Refresh"><i class="fas fa-sync-alt"></i></button>
+                            </div>
+                            <div class="tickets-list" id="ticketsList">
+                                <div class="tickets-empty"><i class="fas fa-spinner fa-spin"></i>Loading...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- app.js: apiRequest / showToast. admin.js: handleLogout, sidebar toggle, escapeHtml, timeAgo, statusBadge -->
+    <script src="/static/app.js"></script>
+    <script src="/static/admin/admin.js"></script>
+    <script>
+    document.addEventListener('DOMContentLoaded', () => {
+        document.getElementById('tk_message').addEventListener('input', updateCount);
+        loadProfile();
+        loadTickets();
+    });
+
+    // ---------- Profile ----------
+    function fillProfile(p) {
+        document.getElementById('p_full_name').value = p.full_name || '';
+        document.getElementById('p_email').value = p.email || '';
+        document.getElementById('p_phone').value = p.phone || '';
+        document.getElementById('p_role').value = p.role ? (p.role[0].toUpperCase() + p.role.slice(1)) : '';
+        document.getElementById('p_specialization').value = p.specialization || '';
+        document.getElementById('accountInfo').innerHTML = `
+            <span><i class="fas fa-hashtag"></i> ${escapeHtml(p.id)}</span>
+            <span><i class="fas fa-calendar-plus"></i> Joined ${p.date_created ? formatDate(p.date_created) : '\u2014'}</span>
+            <span><i class="fas fa-sign-in-alt"></i> Last login ${p.last_login ? formatDateTime(p.last_login) : 'Never'}</span>
+            <span><i class="fas fa-circle-check"></i> ${escapeHtml(p.status ? p.status[0].toUpperCase() + p.status.slice(1) : '')}</span>
+        `;
+    }
+
+    async function loadProfile() {
+        try {
+            fillProfile(await apiRequest('/api/auth/profile'));
+        } catch (e) {
+            console.error('loadProfile:', e);
+            document.getElementById('accountInfo').innerHTML = '<span>Could not load your details.</span>';
+        }
+    }
+
+    async function submitProfile(evt) {
+        evt.preventDefault();
+        const btn = document.getElementById('profileSubmitBtn');
+        const payload = {
+            full_name: document.getElementById('p_full_name').value,
+            phone: document.getElementById('p_phone').value,
+            specialization: document.getElementById('p_specialization').value,
+        };
+        if (payload.full_name.trim().length < 2) { showToast('Please enter your full name', 'error'); return; }
+
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...';
+        try {
+            const res = await apiRequest('/api/auth/profile', { method: 'PUT', body: JSON.stringify(payload) });
+            showToast('Profile updated', 'success');
+            fillProfile(res.profile);                       // show what the server actually saved (trimmed / cleaned)
+            document.querySelector('.status-text').textContent = res.profile.full_name;   // sidebar name
+        } catch (e) {
+            console.error('submitProfile:', e);             // apiRequest already showed the error toast
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-save"></i> Save Profile';
+        }
+    }
+
+    function updateCount() {
+        const len = document.getElementById('tk_message').value.length;
+        const el = document.getElementById('tk_count');
+        el.textContent = `${len} / 5000`;
+        el.classList.toggle('near-limit', len > 4500);
+    }
+
+    async function loadTickets() {
+        const list = document.getElementById('ticketsList');
+        try {
+            const tickets = await apiRequest('/api/tickets');
+            if (!tickets.length) {
+                list.innerHTML = '<div class="tickets-empty"><i class="fas fa-inbox"></i>No tickets yet.</div>';
+                return;
+            }
+            list.innerHTML = tickets.map(renderTicket).join('');
+        } catch (e) {
+            console.error('loadTickets:', e);
+            list.innerHTML = '<div class="tickets-empty"><i class="fas fa-exclamation-circle"></i>Could not load your tickets.</div>';
+        }
+    }
+
+    function renderTicket(t) {
+        const reply = t.admin_response ? `
+            <div class="ticket-reply">
+                <div class="ticket-reply-label"><i class="fas fa-reply"></i> Admin response</div>
+                <div class="ticket-reply-text">${escapeHtml(t.admin_response)}</div>
+            </div>` : '';
+        const resolved = t.resolved_at ? ` &middot; Resolved ${timeAgo(t.resolved_at)}` : '';
+        return `
+            <div class="ticket-item">
+                <div class="ticket-top">
+                    <div>
+                        <div class="ticket-subject">${escapeHtml(t.subject)}</div>
+                        <div class="ticket-time">#${t.id} &middot; Raised ${timeAgo(t.created_at)}${resolved}</div>
+                    </div>
+                    ${statusBadge(t.status)}
+                </div>
+                <div class="ticket-message">${escapeHtml(t.message)}</div>
+                ${reply}
+            </div>`;
+    }
+
+    async function submitTicket(evt) {
+        evt.preventDefault();
+        const btn = document.getElementById('ticketSubmitBtn');
+        const subject = document.getElementById('tk_subject').value.trim();
+        const message = document.getElementById('tk_message').value;
+
+        if (subject.length < 3) { showToast('Please enter a subject (at least 3 characters)', 'error'); return; }
+        if (message.trim().length < 5) { showToast('Please describe the issue (at least 5 characters)', 'error'); return; }
+
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Submitting...';
+        try {
+            await apiRequest('/api/tickets', { method: 'POST', body: JSON.stringify({ subject, message }) });
+            showToast('Ticket sent to admin', 'success');
+            document.getElementById('ticketForm').reset();
+            updateCount();
+            await loadTickets();
+        } catch (e) {
+            console.error('submitTicket:', e);   // apiRequest already showed the error toast
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Ticket';
+        }
+    }
+    </script>
+</body>
+</html>

@@ -1,0 +1,70 @@
+version: "3.8"
+
+services:
+  app:
+    build: .
+    container_name: thero_app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Inside the compose network the DB is reached by service name, not
+      # "localhost" — override whatever DB_HOST is set to in .env.
+      DB_HOST: db
+    ports:
+      - "8000:8000"
+    # Camera devices aren't auto-detected by Docker — they must be exposed
+    # explicitly. Mounting the whole /dev tree (instead of hardcoding
+    # /dev/video0) means the app's own _detect_camera_index() can probe
+    # whichever index the webcam actually enumerates at, since USB webcams
+    # often aren't at index 0 and the index can shift when replugged.
+    # `privileged: true` is the simplest reliable way to make that mount
+    # work with a real character device — fine on a locked-down clinic PC
+    # that only runs this app, but ask your infra/security team if that's
+    # not the case for your deployment.
+    privileged: true
+    volumes:
+      - /dev:/dev
+      - ./uploads:/app/uploads
+      - ./reports:/app/reports
+      - ./data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: mysql:8.0
+    container_name: thero_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${DB_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  db_data:
+
+# Notes:
+# - DB_USER in .env must be "root" for this compose file as written (it only
+#   creates a root user + root password). If you'd rather have a dedicated
+#   non-root DB user, add MYSQL_USER / MYSQL_PASSWORD here and match DB_USER
+#   in .env.
+# - Already have a MySQL server running elsewhere (e.g. the clinic's own DB
+#   box)? Delete the whole `db:` service and the `depends_on` block above,
+#   and just point DB_HOST in .env at that server's real address.
+# - Webcam not detected inside the container? Run `ls -l /dev/video*` on the
+#   host to see what's actually there. With `privileged: true` + `/dev:/dev`
+#   mounted, every device node the host sees is visible inside the
+#   container too, so the app's auto-detect should just find it.
+# - Don't want `privileged: true`? The safer alternative is to list each
+#   /dev/videoN device explicitly under a `devices:` key (check the real
+#   ones on the host with `ls /dev/video*` first) plus `group_add: [video]`
+#   — more setup, but a much smaller permission grant.

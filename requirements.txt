@@ -1,0 +1,25 @@
+fastapi
+uvicorn[standard]
+python-multipart
+sqlalchemy
+opencv-python
+mediapipe
+numpy
+pandas
+reportlab
+jinja2
+aiofiles
+pillow
+python-dotenv
+httpx
+python-dateutil
+pymysql
+cryptography
+matplotlib
+pyjwt
+
+#for game 
+opencv-python
+mediapipe
+pygame
+numpy

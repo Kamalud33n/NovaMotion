@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - NovaMotion</title>
+    <link rel="stylesheet" href="/static/style.css?v=2">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="/static/chart.umd.min.js"></script>
+    <style>
+        /* ── Layout rhythm ───────────────────────────── */
+        .content-area {
+            display: flex;
+            flex-direction: column;
+            gap: 28px;
+        }
+
+        .stats-grid,
+        .charts-row,
+        .progress-summary {
+            margin-bottom: 0; /* spacing now handled by .content-area gap */
+            margin-top: 0;
+        }
+
+        /* ── Stat cards: more breathing room ────────── */
+        .stats-grid {
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+        }
+
+        .stat-card {
+            padding: 22px;
+            gap: 18px;
+            align-items: flex-start;
+            border: 1px solid rgba(0, 0, 0, 0.04);
+        }
+
+        .stat-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 13px;
+            font-size: 19px;
+            margin-top: 2px;
+        }
+
+        .stat-content {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            min-width: 0;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            line-height: 1;
+        }
+
+        .stat-label {
+            line-height: 1.3;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .stat-trend {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            padding: 3px 9px;
+            font-size: 11px;
+        }
+
+        @media (max-width: 1200px) {
+            .stats-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+
+        @media (max-width: 480px) {
+            .stats-grid { grid-template-columns: 1fr; }
+        }
+
+        /* ── Chart fix ───────────────────────────────── */
+        .chart-container {
+            padding: 26px;
+            border-radius: var(--card-radius);
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            border: 1px solid rgba(0, 0, 0, 0.04);
+            /* NO min-height / max-height here – wrapper controls canvas */
+        }
+
+        .chart-header {
+            margin-bottom: 20px;
+        }
+
+        .chart-header h3 {
+            letter-spacing: 0.2px;
+        }
+
+        .canvas-wrapper {
+            position: relative;
+            width: 100%;
+            height: 220px;      /* fixed canvas area */
+            flex-shrink: 0;
+        }
+
+        .canvas-wrapper canvas {
+            position: absolute !important;
+            top: 0;
+            left: 0;
+            width: 100% !important;
+            height: 100% !important;
+        }
+
+        /* ── Responsive tweaks for charts ───────────── */
+        @media (max-width: 1024px) {
+            .charts-row {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .canvas-wrapper {
+                height: 180px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .canvas-wrapper {
+                height: 150px;
+            }
+            .chart-header h3 {
+                font-size: 14px;
+            }
+        }
+
+        /* ── Progress timeline ───────────────────────── */
+        .progress-summary {
+            padding: 26px;
+            border-radius: var(--card-radius);
+            border: 1px solid rgba(0, 0, 0, 0.04);
+        }
+
+        .section-header {
+            margin-bottom: 20px;
+        }
+
+        .progress-filters {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .filter-btn {
+            padding: 4px 14px;
+            border: 1px solid rgba(0,0,0,0.08);
+            border-radius: 20px;
+            background: transparent;
+            font-size: 12px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: var(--transition-smooth);
+        }
+
+        .filter-btn:hover {
+            border-color: var(--medical-green);
+            color: var(--medical-green);
+        }
+
+        .filter-btn.active {
+            background: var(--medical-green);
+            border-color: var(--medical-green);
+            color: #fff;
+        }
+
+        .progress-timeline {
+            display: grid;
+            gap: 12px;
+            margin-top: 4px;
+            max-height: 340px;
+            overflow-y: auto;
+            padding-right: 6px;
+        }
+
+        .timeline-item {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            padding: 14px 18px;
+            border-radius: 12px;
+            background: var(--surface-alt);
+            border: 1px solid rgba(0,0,0,0.03);
+            flex-wrap: wrap;
+            transition: var(--transition-smooth);
+        }
+
+        .timeline-item:hover {
+            background: var(--surface);
+            box-shadow: 0 4px 16px rgba(0,0,0,0.05);
+        }
+
+        .timeline-date {
+            font-size: 12px;
+            color: var(--text-light);
+            min-width: 72px;
+            flex-shrink: 0;
+            font-weight: 500;
+        }
+
+        .timeline-exercise {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            flex: 1;
+            min-width: 140px;
+        }
+
+        .timeline-metrics {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .metric-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        @media (max-width: 480px) {
+            .timeline-item {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 6px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar glass-effect">
+            <div class="sidebar-header">
+                <div class="logo-container">
+                    <img class="logo-icon" src="/assets/logo.png?v=2" alt="MedNova logo" width="44" height="44">
+                    <div class="logo-text">
+                        <span class="logo-title">MedNova</span>
+                        <span class="logo-subtitle">Therapy System</span>
+                    </div>
+                </div>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="/dashboard" class="nav-item active"><i class="fas fa-th-large"></i><span>Dashboard</span></a>
+                <a href="/patients"  class="nav-item"><i class="fas fa-users"></i><span>Patients</span></a>
+                <a href="/session"   class="nav-item"><i class="fas fa-video"></i><span>Start Session</span></a>
+                <a href="/reports"   class="nav-item"><i class="fas fa-file-alt"></i><span>Reports</span></a>
+                <a href="/analytics" class="nav-item"><i class="fas fa-chart-line"></i><span>Analysis</span></a>
+                <a href="/settings"        class="nav-item"><i class="fas fa-cog"></i><span>Settings</span></a>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="status-indicator">
+                    <span class="status-dot" id="systemDot"></span>
+                    <span class="status-text" id="systemStatusText">Checking...</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Top Bar -->
+            <header class="top-bar glass-effect">
+                <div class="top-bar-left">
+                    <button class="menu-toggle" id="menuToggle"><i class="fas fa-bars"></i></button>
+                    <div class="breadcrumb">
+                        <span>Home</span>
+                        <i class="fas fa-chevron-right"></i>
+                        <span class="active">Dashboard</span>
+                    </div>
+                </div>
+                <div class="top-bar-right">
+                    <div class="status-badge">
+                        <span class="badge-dot" id="aiBadgeDot"></span>
+                        <span id="aiStatusText">Checking...</span>
+                    </div>
+                    <div class="camera-status">
+                        <i class="fas fa-camera"></i>
+                        <span id="cameraStatusText">Disconnected</span>
+                    </div>
+                    <button class="logout-btn" onclick="handleLogout()">
+                        <i class="fas fa-sign-out-alt"></i>
+                    </button>
+                </div>
+            </header>
+
+            <!-- Dashboard Content -->
+            <div class="content-area">
+
+                <!-- Stats Grid -->
+                <div class="stats-grid" id="dashboardStats">
+                    <!-- Populated by JS -->
+                </div>
+
+                <!-- Charts Row 1 -->
+                <div class="charts-row">
+                    <div class="chart-container glass-effect animate-slide-up">
+                        <div class="chart-header">
+                            <h3>Movement Accuracy</h3>
+                            <div class="chart-controls">
+                                <button class="chart-btn active" data-chart="accuracy" data-period="week">Week</button>
+                                <button class="chart-btn"        data-chart="accuracy" data-period="month">Month</button>
+                            </div>
+                        </div>
+                        <!-- canvas-wrapper fixes the grow issue -->
+                        <div class="canvas-wrapper">
+                            <canvas id="accuracyChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="chart-container glass-effect animate-slide-up">
+                        <div class="chart-header">
+                            <h3>Range of Motion</h3>
+                            <div class="chart-controls">
+                                <button class="chart-btn active" data-chart="rom" data-period="week">Week</button>
+                                <button class="chart-btn"        data-chart="rom" data-period="month">Month</button>
+                            </div>
+                        </div>
+                        <div class="canvas-wrapper">
+                            <canvas id="romChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Charts Row 2 -->
+                <div class="charts-row">
+                    <div class="chart-container glass-effect animate-slide-up">
+                        <div class="chart-header"><h3>Exercise Completion</h3></div>
+                        <div class="canvas-wrapper">
+                            <canvas id="completionChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="chart-container glass-effect animate-slide-up">
+                        <div class="chart-header"><h3>Patient Recovery Trend</h3></div>
+                        <div class="canvas-wrapper">
+                            <canvas id="recoveryChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Progress Timeline -->
+                <div class="progress-summary glass-effect animate-slide-up">
+                    <div class="section-header">
+                        <h3>Progress Timeline</h3>
+                        <div class="progress-filters">
+                            <button class="filter-btn active" data-filter="all">All</button>
+                            <button class="filter-btn" data-filter="accuracy">Accuracy</button>
+                            <button class="filter-btn" data-filter="rom">ROM</button>
+                            <button class="filter-btn" data-filter="stability">Stability</button>
+                        </div>
+                    </div>
+                    <div class="progress-timeline" id="progressTimeline">
+                        <div class="loading-placeholder">Loading timeline...</div>
+                    </div>
+                </div>
+
+            </div><!-- /content-area -->
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+    <script>
+    // State 
+    let _dashData     = null;
+    let _charts       = {};
+    let _allRows      = [];
+
+    // Boot 
+    document.addEventListener('DOMContentLoaded', async () => {
+        document.getElementById('menuToggle')?.addEventListener('click', () =>
+            document.querySelector('.sidebar').classList.toggle('active'));
+
+        await Promise.all([checkHealth(), loadDashboard()]);
+        bindFilterButtons();
+        bindChartPeriodButtons();
+    });
+
+    // Health check 
+    async function checkHealth() {
+        try {
+            const d = await (await fetch('/api/health')).json();
+            const online = d.status === 'healthy';
+
+            const dot     = document.getElementById('systemDot');
+            dot.className = 'status-dot ' + (online ? 'online' : 'offline');
+            document.getElementById('systemStatusText').textContent = online ? 'System Online' : 'System Error';
+            document.getElementById('cameraStatusText').textContent = d.camera_running ? 'Connected' : 'Disconnected';
+
+            const aiDot = document.getElementById('aiBadgeDot');
+            aiDot.style.background = d.mediapipe_ready ? '#1D8A6D' : '#D9503E';
+            document.getElementById('aiStatusText').textContent = d.mediapipe_ready ? 'AI Ready' : 'AI Offline';
+        } catch {
+            document.getElementById('systemStatusText').textContent = 'Offline';
+        }
+    }
+
+    // Main dashboard load 
+    async function loadDashboard() {
+        try {
+            _dashData = await (await fetch('/api/dashboard')).json();
+            renderStats(_dashData.statistics);
+            renderTimeline(_dashData.progress);
+            initCharts(_dashData);
+
+            // initCharts() above draws the accuracy/ROM charts from the FULL
+            // progress history. But the "Week" toggle is marked `active` in
+            // the HTML by default — so the very first thing the user sees
+            // never actually matched the "Week" label, and toggling
+            // Week/Month afterward could look like it does nothing (e.g. if
+            // all real session data so far already falls inside a week, both
+            // filters return the same rows). Re-apply the currently-active
+            // period right after building the charts so the initial view and
+            // the highlighted button always agree, and every later click has
+            // a real, visible baseline to change from.
+            ['accuracy', 'rom'].forEach(group => {
+                const activeBtn = document.querySelector(`.chart-btn.active[data-chart="${group}"]`);
+                if (activeBtn) refreshChartByPeriod(group, activeBtn.dataset.period);
+            });
+        } catch(e) {
+            console.error('loadDashboard:', e);
+            document.getElementById('dashboardStats').innerHTML =
+                '<p style="color:red;padding:1rem">Failed to load dashboard data.</p>';
+        }
+    }
+
+    // Stats grid 
+    function renderStats(s) {
+        const weekAcc  = _dashData.weekly?.accuracy  ?? 0;
+        const monthAcc = _dashData.monthly?.accuracy ?? 0;
+        const improvement = monthAcc > 0
+            ? (((weekAcc - monthAcc) / monthAcc) * 100).toFixed(1) : 0;
+        const impSign = improvement >= 0 ? '+' : '';
+
+        const stats = [
+            { icon:'fa-calendar-check', label:"Today's Sessions",    value: s.today_sessions,       color:'#1D8A6D', trend: null },
+            { icon:'fa-check-circle',   label:'Exercises Completed',  value: s.completed_exercises,  color:'#3E6FD9', trend: null },
+            { icon:'fa-percent',        label:'Avg Accuracy',         value: s.avg_accuracy + '%',   color:'#8B5FC7', trend: impSign + improvement + '%' },
+            { icon:'fa-arrows-alt-h',   label:'Avg ROM',              value: s.avg_rom + '°',        color:'#D68F35', trend: null },
+            { icon:'fa-heart',          label:'Recovery Score',       value: s.recovery_score + '%', color:'#D9503E', trend: null },
+            { icon:'fa-shield-alt',     label:'Avg Stability',        value: s.avg_stability + '%',  color:'#1AA6B7', trend: null },
+            { icon:'fa-balance-scale',  label:'Avg Balance',          value: s.avg_balance + '%',    color:'#FF5722', trend: null },
+            { icon:'fa-chart-line',     label:'Weekly Sessions',      value: _dashData.weekly?.sessions ?? 0, color:'#607D8B', trend: null },
+        ];
+
+        document.getElementById('dashboardStats').innerHTML = stats.map(st => `
+            <div class="stat-card glass-effect animate-slide-up">
+                <div class="stat-icon" style="background:${st.color}20;color:${st.color}">
+                    <i class="fas ${st.icon}"></i>
+                </div>
+                <div class="stat-content">
+                    <span class="stat-value">${st.value}</span>
+                    <span class="stat-label">${st.label}</span>
+                </div>
+                ${st.trend !== null ? `
+                <div class="stat-trend" style="color:${parseFloat(st.trend)>=0?'#1D8A6D':'#D9503E'}">
+                    <i class="fas fa-arrow-${parseFloat(st.trend)>=0?'up':'down'}"></i>
+                    <span>${st.trend}</span>
+                </div>` : ''}
+            </div>
+        `).join('');
+    }
+
+    // Progress timeline 
+    function renderTimeline(rows, filter = 'all') {
+        _allRows = rows || [];
+        const container = document.getElementById('progressTimeline');
+
+        if (!_allRows.length) {
+            container.innerHTML = '<p style="padding:1rem;color:#888">No session data yet.</p>';
+            return;
+        }
+
+        container.innerHTML = _allRows.map(row => {
+            const acc  = row.accuracy.toFixed(1);
+            const rom  = row.rom.toFixed(1);
+            const stab = row.stability.toFixed(1);
+
+            const accColor  = row.accuracy  >= 80 ? '#1D8A6D' : row.accuracy  >= 60 ? '#D68F35' : '#D9503E';
+            const romColor  = row.rom       >= 70 ? '#3E6FD9' : row.rom       >= 50 ? '#D68F35' : '#D9503E';
+            const stabColor = row.stability >= 75 ? '#8B5FC7' : row.stability >= 55 ? '#D68F35' : '#D9503E';
+
+            const showAcc  = filter === 'all' || filter === 'accuracy';
+            const showRom  = filter === 'all' || filter === 'rom';
+            const showStab = filter === 'all' || filter === 'stability';
+
+            return `
+            <div class="timeline-item">
+                <div class="timeline-date">${row.date}</div>
+                <div class="timeline-exercise">${row.exercise}</div>
+                <div class="timeline-metrics">
+                    ${showAcc  ? `<span class="metric-badge" style="background:${accColor}20;color:${accColor}">
+                        <i class="fas fa-bullseye"></i> ${acc}%</span>` : ''}
+                    ${showRom  ? `<span class="metric-badge" style="background:${romColor}20;color:${romColor}">
+                        <i class="fas fa-arrows-alt-h"></i> ${rom}°</span>` : ''}
+                    ${showStab ? `<span class="metric-badge" style="background:${stabColor}20;color:${stabColor}">
+                        <i class="fas fa-shield-alt"></i> ${stab}%</span>` : ''}
+                </div>
+            </div>`;
+        }).join('');
+    }
+
+    // Filter buttons 
+    function bindFilterButtons() {
+        document.querySelectorAll('.filter-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                renderTimeline(_allRows, btn.dataset.filter);
+            });
+        });
+    }
+
+    // Charts init 
+    function initCharts(data) {
+        const progress = data.progress || [];
+        const sorted   = [...progress].sort((a,b) => new Date(a.date) - new Date(b.date));
+
+        const labels   = sorted.map(r => r.date.slice(5));
+        const accData  = sorted.map(r => r.accuracy);
+        const romData  = sorted.map(r => r.rom);
+
+        _charts.accuracy = buildLineChart('accuracyChart', labels, accData, 'Accuracy %', '#1D8A6D', v => v + '%', 100);
+        _charts.rom      = buildBarChart ('romChart',      labels, romData, 'ROM °',       '#3E6FD9', v => v + '°', 120);
+
+        const totalCompleted = progress.filter(r => r.accuracy > 0).length;
+        buildDoughnutChart('completionChart',
+            ['Completed', 'Incomplete'],
+            [totalCompleted, progress.length - totalCompleted],
+            ['#1D8A6D', '#e0e0e0']);
+
+        const recoveryByDate = {};
+        sorted.forEach(r => {
+            if (!recoveryByDate[r.date]) recoveryByDate[r.date] = [];
+            recoveryByDate[r.date].push((r.stability + r.balance) / 2);
+        });
+        const recLabels = Object.keys(recoveryByDate).map(d => d.slice(5));
+        const recData   = Object.values(recoveryByDate).map(arr => arr.reduce((a,b)=>a+b,0)/arr.length);
+        _charts.recovery = buildLineChart('recoveryChart', recLabels, recData, 'Recovery %', '#8B5FC7', v => v.toFixed(1)+'%', 100);
+    }
+
+    // Chart period toggle 
+    function bindChartPeriodButtons() {
+        document.querySelectorAll('.chart-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const group = btn.dataset.chart;
+                document.querySelectorAll(`.chart-btn[data-chart="${group}"]`)
+                    .forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                await refreshChartByPeriod(group, btn.dataset.period);
+            });
+        });
+    }
+
+    async function refreshChartByPeriod(chartName, period) {
+        if (!_dashData) return;
+        const cutoff = period === 'week' ? 7 : 30;
+        const now    = new Date();
+
+        const allDates = (_dashData.progress || []).map(r => r.date);
+        const filtered = (_dashData.progress || [])
+            .filter(r => (now - new Date(r.date)) / 86400000 <= cutoff)
+            .sort((a,b) => new Date(a.date) - new Date(b.date));
+
+        // TEMP DEBUG — remove once confirmed. Shows exactly why the chart
+        // may look unchanged: if filtered.length === allDates.length for
+        // BOTH week and month, every session you have is already inside a
+        // week, so there's nothing for the "Month" filter to add/remove.
+        console.log(`[chart-toggle] ${chartName}/${period}: cutoff=${cutoff}d, total sessions=${allDates.length}, matching=${filtered.length}, all dates=`, allDates);
+
+        const chart = _charts[chartName];
+        if (!chart || !chart.data?.datasets?.[0]) {
+            console.warn('refreshChartByPeriod: chart not ready for', chartName);
+            return;
+        }
+
+        chart.data.labels = filtered.map(r => r.date.slice(5));
+        chart.data.datasets[0].data = filtered.map(r => chartName === 'accuracy' ? r.accuracy : r.rom);
+        chart.update();
+    }
+
+    // Chart builders
+    function buildLineChart(id, labels, data, label, color, tickCb, maxY) {
+        const ctx = document.getElementById(id)?.getContext('2d');
+        if (!ctx) return null;
+        return new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [{
+                    label, data,
+                    borderColor: color,
+                    backgroundColor: color + '18',
+                    tension: 0.4, fill: true, borderWidth: 3,
+                    pointBackgroundColor: color,
+                    pointBorderColor: '#fff',
+                    pointBorderWidth: 2, pointRadius: 4
+                }]
+            },
+            options: chartOptions(tickCb, maxY)
+        });
+    }
+
+    function buildBarChart(id, labels, data, label, color, tickCb, maxY) {
+        const ctx = document.getElementById(id)?.getContext('2d');
+        if (!ctx) return null;
+        return new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels,
+                datasets: [{
+                    label, data,
+                    backgroundColor: color + 'B3',
+                    borderColor: color,
+                    borderWidth: 2, borderRadius: 6,
+                    hoverBackgroundColor: color
+                }]
+            },
+            options: chartOptions(tickCb, maxY)
+        });
+    }
+
+    function buildDoughnutChart(id, labels, data, colors) {
+        const ctx = document.getElementById(id)?.getContext('2d');
+        if (!ctx) return null;
+        return new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels,
+                datasets: [{ data, backgroundColor: colors, borderColor:'#fff', borderWidth:3, hoverOffset:8 }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false, cutout: '70%',
+                plugins: {
+                    legend: { position:'bottom', labels:{ padding:20, usePointStyle:true, pointStyle:'circle', font:{size:12} } },
+                    tooltip: tooltipStyle()
+                }
+            }
+        });
+    }
+
+    function chartOptions(tickCb, maxY) {
+        return {
+            responsive: true,
+            maintainAspectRatio: false,   /* canvas-wrapper height */
+            plugins: { legend:{ display:false }, tooltip: tooltipStyle() },
+            scales: {
+                y: {
+                    beginAtZero: true, max: maxY,
+                    grid: { color:'rgba(0,0,0,0.04)' },
+                    ticks: { callback: tickCb, font:{ size:11 } }
+                },
+                x: {
+                    grid: { display:false },
+                    ticks: { font:{ size:11 }, maxRotation: 45 }
+                }
+            },
+            interaction: { intersect:false, mode:'index' }
+        };
+    }
+
+    function tooltipStyle() {
+        return {
+            backgroundColor:'rgba(255,255,255,0.95)',
+            titleColor:'#1a2332', bodyColor:'#5a6b7c',
+            borderColor:'rgba(0,0,0,0.08)', borderWidth:1,
+            cornerRadius:12, padding:12
+        };
+    }
+
+    function handleLogout() {
+        if (!confirm('Are you sure you want to logout?')) return;
+        fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' })
+            .catch(() => {})
+            .finally(() => { window.location.href = '/login'; });
+    }
+    </script>
+</body>
+</html>

@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign in - {{ app_name }}</title>
+    <link rel="stylesheet" href="/static/style.css?v=2">
+    <link rel="stylesheet" href="/static/auth/auth.css?v=1">
+</head>
+<body class="auth-body" data-pw-min="{{ password_min_length }}">
+    <main class="auth-card">
+        <div class="auth-brand">
+            <img src="/assets/logo.png?v=2" alt="" width="44" height="44">
+            <div>
+                <div class="brand-name">{{ app_name }}</div>
+                <div class="brand-sub">THERAPY SYSTEM</div>
+            </div>
+        </div>
+
+        <h1 class="auth-title" id="authTitle">Welcome back</h1>
+        <p class="auth-lead" id="authLead">Sign in to continue to your dashboard.</p>
+
+        <div class="auth-tabs" role="tablist">
+            <button type="button" class="auth-tab active" data-tab="login" role="tab" aria-selected="true">Sign in</button>
+            <button type="button" class="auth-tab" data-tab="register" role="tab" aria-selected="false">Create account</button>
+        </div>
+
+        <div class="auth-alert" id="authAlert" role="alert"></div>
+
+        <!-- Sign in -->
+        <form class="auth-form" id="loginForm" novalidate>
+            <div class="form-group">
+                <label for="loginEmail">Email</label>
+                <input class="form-input" id="loginEmail" name="email" type="email" autocomplete="username" placeholder="you@clinic.com" required>
+            </div>
+            <div class="form-group">
+                <label for="loginPassword">Password</label>
+                <div class="pw-field">
+                    <input class="form-input" id="loginPassword" name="password" type="password" autocomplete="current-password" placeholder="Your password" required>
+                    <button type="button" class="pw-toggle" tabindex="-1">Show</button>
+                </div>
+            </div>
+            <div class="auth-links">
+                <span></span>
+                <a href="/forgot-password">Forgot password?</a>
+            </div>
+            <button type="submit" class="btn-primary auth-submit">Sign in</button>
+        </form>
+
+        <!-- Create account -->
+        <form class="auth-form" id="registerForm" novalidate hidden>
+            <div class="form-group">
+                <label for="regName">Full name</label>
+                <input class="form-input" id="regName" name="full_name" type="text" maxlength="100" autocomplete="name" placeholder="Dr. Jane Doe" required>
+            </div>
+            <div class="form-group">
+                <label for="regEmail">Email</label>
+                <input class="form-input" id="regEmail" name="email" type="email" autocomplete="email" placeholder="you@clinic.com" required>
+            </div>
+            <div class="auth-row">
+                <div class="form-group">
+                    <label for="regRole">I am a</label>
+                    <select class="form-input" id="regRole" name="role" required>
+                        <option value="doctor">Doctor</option>
+                        <option value="therapist">Therapist</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="regPhone">Phone <span class="opt">(optional)</span></label>
+                    <input class="form-input" id="regPhone" name="phone" type="tel" maxlength="20" autocomplete="tel" placeholder="+968 ...">
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="regSpec">Specialization <span class="opt">(optional)</span></label>
+                <input class="form-input" id="regSpec" name="specialization" type="text" maxlength="100" placeholder="e.g. Orthopedic rehabilitation">
+            </div>
+            <div class="form-group">
+                <label for="regPassword">Password</label>
+                <div class="pw-field">
+                    <input class="form-input" id="regPassword" name="password" type="password" autocomplete="new-password" required>
+                    <button type="button" class="pw-toggle" tabindex="-1">Show</button>
+                </div>
+                <span class="field-hint">At least {{ password_min_length }} characters, with a letter and a number.</span>
+            </div>
+            <div class="form-group">
+                <label for="regConfirm">Confirm password</label>
+                <div class="pw-field">
+                    <input class="form-input" id="regConfirm" name="confirm_password" type="password" autocomplete="new-password" required>
+                    <button type="button" class="pw-toggle" tabindex="-1">Show</button>
+                </div>
+            </div>
+            <button type="submit" class="btn-primary auth-submit">Request account</button>
+        </form>
+
+        <!-- Verify email (OTP) -->
+        <form class="auth-form" id="otpForm" novalidate hidden>
+            <p class="auth-lead" style="margin:0 0 16px">Enter the code sent to <strong id="otpEmail"></strong>.</p>
+            <div class="form-group">
+                <label for="otpCode">Verification code</label>
+                <input class="form-input" id="otpCode" name="otp" type="text" inputmode="numeric"
+                       pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" placeholder="000000" required>
+            </div>
+            <button type="submit" class="btn-primary auth-submit">Verify &amp; submit</button>
+            <div class="auth-links">
+                <span></span>
+                <button type="button" class="link-btn" id="otpResendBtn">Resend code</button>
+            </div>
+        </form>
+    </main>
+    <script src="/static/auth/auth.js?v=1"></script>
+</body>
+</html>

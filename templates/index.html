@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ app_name }} - Rehabilitation you can see</title>
+    <meta name="description" content="{{ app_name }} turns an ordinary camera into a rehabilitation assistant that guides each exercise and shows clinicians clear proof of recovery.">
+    <link rel="icon" href="/assets/logo.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --ink: #12261f;
+            --muted: #4d625a;
+            --teal: #1D8A6D;
+            --deep: #145940;
+            --paper: #faf9f6;
+            --mist: #e6f0ec;
+            --line: #d9e3de;
+            --serif: 'Newsreader', Georgia, serif;
+            --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html { scroll-behavior: smooth; }
+        body { font-family: var(--sans); color: var(--ink); background: var(--paper); line-height: 1.65; -webkit-font-smoothing: antialiased; }
+        img { display: block; max-width: 100%; }
+        a { color: inherit; }
+        :focus-visible { outline: 3px solid var(--teal); outline-offset: 3px; border-radius: 6px; }
+        .wrap { width: min(1140px, 100% - 48px); margin-inline: auto; }
+
+        .nav { position: sticky; top: 0; z-index: 10; background: rgba(250, 249, 246, .92); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+        .nav .wrap { display: flex; align-items: center; justify-content: space-between; gap: 24px; height: 68px; }
+        .brand { white-space: nowrap; display: flex; align-items: center; gap: 12px; text-decoration: none; font-family: var(--serif); font-size: 1.35rem; font-weight: 600; }
+        .brand img { width: 36px; height: 36px; }
+        .nav-links { display: flex; gap: 28px; font-size: .95rem; color: var(--muted); }
+        .nav-links a { text-decoration: none; }
+        .nav-links a:hover { color: var(--deep); }
+        .nav-cta { display: flex; gap: 10px; }
+        .nav-cta .btn { border-radius: 999px; padding: 9px 22px; }
+
+        .btn { display: inline-flex; align-items: center; justify-content: center; padding: 11px 22px; border-radius: 10px; font: 600 .95rem var(--sans); text-decoration: none; border: 1.5px solid var(--teal); transition: background .2s, color .2s; }
+        .btn-solid { background: var(--teal); color: #fff; }
+        .btn-solid:hover { background: var(--deep); border-color: var(--deep); }
+        .btn-line { color: var(--deep); background: transparent; }
+        .btn-line:hover { background: var(--mist); }
+
+        .ph { position: relative; overflow: hidden; border-radius: 18px; background: linear-gradient(140deg, #cfe6dd 0%, #9cc9b9 55%, #5fa58f 100%); }
+        .ph::after { content: attr(data-slot); position: absolute; inset: 0; display: grid; place-items: center; font-size: .8rem; color: rgba(18, 38, 31, .45); }
+        .ph img { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; object-fit: cover; }
+
+        .hero { padding: 76px 0 96px; background: var(--deep); color: #fff; }
+        .hero .wrap { display: grid; grid-template-columns: 1.02fr 1fr; gap: 64px; align-items: center; }
+        h1 { font-family: var(--serif); font-weight: 500; font-size: clamp(2.5rem, 5.2vw, 4.1rem); line-height: 1.06; letter-spacing: -.02em; }
+        .lead { margin-top: 24px; font-size: 1.16rem; color: rgba(255, 255, 255, .84); max-width: 33em; }
+        .hero-note { margin-top: 32px; padding-left: 16px; border-left: 3px solid var(--teal); font-size: .92rem; color: rgba(255, 255, 255, .72); max-width: 32em; }
+        .hero-img { aspect-ratio: 4 / 4.4; border-radius: 26px; box-shadow: 0 30px 60px rgba(0, 0, 0, .28); background: linear-gradient(140deg, #2f8f75 0%, #1d6b55 60%, #145940 100%); }
+        .hero-img::after { color: rgba(255, 255, 255, .5); }
+        .chip { position: absolute; z-index: 2; color: var(--ink); background: #fff; border-radius: 12px; padding: 9px 14px; font-size: .84rem; font-weight: 600; box-shadow: 0 6px 22px rgba(18, 38, 31, .16); display: flex; align-items: center; gap: 9px; }
+        .chip i { width: 9px; height: 9px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 0 4px rgba(29, 138, 109, .2); }
+        .chip.a { right: 5%; top: 7%; }
+        .chip.b { right: 5%; top: 60%; }
+        .chip.c { left: 5%; bottom: 6%; }
+
+        section { padding: 88px 0; }
+        h2 { font-family: var(--serif); font-weight: 500; font-size: clamp(1.9rem, 3.4vw, 2.7rem); line-height: 1.15; letter-spacing: -.015em; max-width: 20em; }
+        .sec-lead { margin-top: 16px; color: var(--muted); font-size: 1.08rem; max-width: 38em; }
+
+        .problem { background: var(--mist); }
+        .problem .wrap { display: grid; grid-template-columns: 1fr 1.1fr; gap: 64px; align-items: center; }
+        .problem .ph { aspect-ratio: 5 / 4; }
+        .problem p { margin-top: 18px; color: var(--muted); font-size: 1.06rem; }
+        .problem p strong { color: var(--ink); font-weight: 600; }
+
+        .steps { margin-top: 52px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; border-top: 2px solid var(--ink); }
+        .step { padding: 26px 26px 0 0; }
+        .step + .step { padding-left: 26px; border-left: 1px solid var(--line); }
+        .step b { font-family: var(--serif); font-size: 2.3rem; font-weight: 500; color: var(--teal); line-height: 1; }
+        .step h3 { margin: 12px 0 8px; font-size: 1.1rem; font-weight: 600; }
+        .step p { color: var(--muted); font-size: .96rem; }
+        .steps-img { margin-top: 56px; aspect-ratio: 21 / 8; border-radius: 22px; }
+        .steps-img .fade { position: absolute; left: 0; right: 0; bottom: 0; height: 40%; z-index: 2; background: linear-gradient(to bottom, rgba(250, 249, 246, 0), var(--paper) 94%); }
+
+        .features { background: #fff; border-block: 1px solid var(--line); }
+        .features .wrap { display: grid; grid-template-columns: .8fr 1.4fr; gap: 80px; align-items: start; }
+        .features h2 { position: sticky; top: 108px; }
+        .feat { padding: 26px 0; border-top: 1px solid var(--line); }
+        .feat:first-child { padding-top: 0; border-top: 0; }
+        .feat h3 { font-family: var(--serif); font-size: 1.32rem; font-weight: 600; margin-bottom: 6px; }
+        .feat p { color: var(--muted); }
+
+        .play .wrap { display: grid; grid-template-columns: 1.1fr 1fr; gap: 64px; align-items: center; }
+        .play .ph { aspect-ratio: 4 / 3; }
+        .play p { margin-top: 18px; color: var(--muted); font-size: 1.06rem; }
+        .tags { margin-top: 24px; display: flex; flex-wrap: wrap; gap: 8px; }
+        .tags span { padding: 6px 14px; border: 1px solid var(--line); border-radius: 999px; font-size: .88rem; background: #fff; }
+
+        .who { background: var(--mist); }
+        .who-grid { margin-top: 48px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 48px; }
+        .who-grid > div { padding-top: 22px; border-top: 2px solid var(--teal); }
+        .who-grid h3 { font-family: var(--serif); font-size: 1.5rem; font-weight: 500; margin-bottom: 10px; }
+        .who-grid p { color: var(--muted); }
+
+        .report .wrap { display: grid; grid-template-columns: 1fr 1.1fr; gap: 64px; align-items: center; }
+        .report .ph { aspect-ratio: 5 / 4; }
+        .report p { margin-top: 18px; color: var(--muted); font-size: 1.06rem; }
+
+
+        footer { padding: 36px 0; border-top: 1px solid var(--line); font-size: .9rem; color: var(--muted); }
+        footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+
+        @media (max-width: 900px) {
+            .nav-links { display: none; }
+            .hero { padding: 40px 0 56px; }
+            .hero .wrap, .problem .wrap, .play .wrap, .report .wrap { grid-template-columns: 1fr; gap: 40px; }
+            .play .ph { order: 2; }
+            .steps { grid-template-columns: 1fr 1fr; }
+            .step:nth-child(3) { padding-left: 0; border-left: 0; }
+            .step { padding-bottom: 28px; }
+            .features .wrap { grid-template-columns: 1fr; gap: 32px; }
+            .features h2 { position: static; }
+            .who-grid { grid-template-columns: 1fr; gap: 32px; }
+            .steps-img img { object-position: 62% top; }
+            section { padding: 60px 0; }
+            .steps-img { aspect-ratio: 16 / 9; }
+        }
+        @media (max-width: 520px) {
+            .brand { font-size: 1.15rem; }
+            .nav-cta .btn { padding: 8px 15px; font-size: .88rem; }
+            .steps { grid-template-columns: 1fr; }
+            .step, .step + .step { padding-left: 0; border-left: 0; }
+        }
+        @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .btn { transition: none; } }
+    </style>
+</head>
+<body>
+    <header class="nav">
+        <div class="wrap">
+            <a class="brand" href="/"><img src="/assets/logo.png" alt="">{{ app_name }}</a>
+            <nav class="nav-links" aria-label="Sections">
+                <a href="#how">How it works</a>
+                <a href="#features">What you get</a>
+                <a href="#who">Who it's for</a>
+            </nav>
+            <div class="nav-cta">
+                {% if home_url %}
+                <a class="btn btn-solid" href="{{ home_url }}">Open my workspace</a>
+                {% else %}
+                <a class="btn btn-line" href="/login">Login</a>
+                <a class="btn btn-solid" href="/login#register">Register</a>
+                {% endif %}
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <section class="hero">
+            <div class="wrap">
+                <div>
+                    <h1>Rehabilitation you can see getting better.</h1>
+                    <p class="lead">{{ app_name }} turns an ordinary camera into a rehabilitation assistant. It watches every exercise, guides the patient as they move, and gives clinicians clear proof of recovery, session after session.</p>
+                    <p class="hero-note">For doctors and therapists. Use Login or Register at the top right. New accounts are approved by the clinic administrator.</p>
+                </div>
+                <div class="ph hero-img" data-slot="hero.jpg">
+                    <img src="/assets/hero.jpeg" alt="A patient doing a guided rehabilitation exercise in front of the camera" onerror="this.remove()">
+                    <span class="chip a"><i></i>Elbow angle 92&deg;</span>
+                    <span class="chip b"><i></i>Movement steady</span>
+                    <span class="chip c"><i></i>Repetition 8 of 12</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="problem">
+            <div class="wrap">
+                <div class="ph" data-slot="problem.jpg">
+                    <img src="/assets/problem.jpeg" alt="A therapist observing a patient's exercise" onerror="this.remove()">
+                </div>
+                <div>
+                    <h2>Recovery happens between visits. Until now, so did the guesswork.</h2>
+                    <p>A therapist can only watch so many repetitions. Patients are often unsure whether they are doing an exercise correctly, and progress is judged by memory and rough notes.</p>
+                    <p><strong>{{ app_name }} brings a second pair of eyes into every session.</strong> It measures each movement as it happens and keeps an honest, comparable record, so decisions about care are based on what actually took place.</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="how">
+            <div class="wrap">
+                <h2>A session, from start to finish</h2>
+                <p class="sec-lead">Nothing to wear and nothing to install for the patient. If they can stand in front of the camera, they can begin.</p>
+                <div class="steps">
+                    <div class="step"><b>1</b><h3>Add the patient</h3><p>Record the diagnosis, the affected area, medical history and the exercise plan once. Everything stays with the patient's record.</p></div>
+                    <div class="step"><b>2</b><h3>Choose an exercise or a game</h3><p>Shoulder, elbow, hand grip, hip, knee, ankle, balance, squats and more, or a game that makes the same movements fun.</p></div>
+                    <div class="step"><b>3</b><h3>The camera guides the session</h3><p>The screen shows the patient's movement live, counts repetitions and points out movements that were not done correctly.</p></div>
+                    <div class="step"><b>4</b><h3>Review the results</h3><p>See the session summary, follow progress over the weeks, and download a clear report to share.</p></div>
+                </div>
+                <div class="ph steps-img" data-slot="session.jpg">
+                    <img src="/assets/session.jpeg" alt="The live session screen showing movement tracking" onerror="this.remove()">
+                    <span class="fade"></span>
+                </div>
+            </div>
+        </section>
+
+        <section id="features" class="features">
+            <div class="wrap">
+                <h2>Everything a clinician needs to trust the numbers</h2>
+                <div>
+                    <div class="feat"><h3>It sees the movement, not just the result</h3><p>Instead of asking how the exercise went, you can watch how the body actually moved, in real time and afterwards.</p></div>
+                    <div class="feat"><h3>Measures what matters in recovery</h3><p>How far a joint moves, how accurate and steady the movement is, balance, smoothness, early signs of tiredness, and one overall recovery score.</p></div>
+                    <div class="feat"><h3>Progress you can show</h3><p>Charts turn weeks of sessions into a picture anyone can understand, for the patient, the family or a referring doctor.</p></div>
+                    <div class="feat"><h3>Reports ready to hand over</h3><p>Generate a clean PDF report for any patient in a click, with results and history in one document.</p></div>
+                    <div class="feat"><h3>Made for the clinic</h3><p>It runs on the clinic computer with a standard webcam. No wearable sensors, no special equipment, no complicated setup.</p></div>
+                    <div class="feat"><h3>Private by design</h3><p>Only clinicians approved by the administrator can sign in, and patient records stay behind that sign-in.</p></div>
+                </div>
+            </div>
+        </section>
+
+        <section class="play">
+            <div class="wrap">
+                <div>
+                    <h2>Exercise that feels like play</h2>
+                    <p>Repetitive exercises are hard to keep up. Game-based sessions turn the same therapeutic movements into something patients want to do again tomorrow, while every step and movement is still measured for the clinician.</p>
+                    <div class="tags"><span>Shoulder</span><span>Elbow</span><span>Hand grip</span><span>Hip</span><span>Knee</span><span>Ankle</span><span>Balance</span><span>Squats</span></div>
+                </div>
+                <div class="ph" data-slot="games.jpg">
+                    <img src="/assets/game.jpeg" alt="A patient playing a movement-controlled rehabilitation game" onerror="this.remove()">
+                </div>
+            </div>
+        </section>
+
+        <section id="who" class="who">
+            <div class="wrap">
+                <h2>Built around the people in the room</h2>
+                <div class="who-grid">
+                    <div><h3>Doctors</h3><p>Follow each patient's recovery with objective numbers, adjust the plan with confidence and back every decision with evidence.</p></div>
+                    <div><h3>Therapists</h3><p>Spend less time counting and note-taking and more time coaching, with the details of every session captured automatically.</p></div>
+                    <div><h3>Patients</h3><p>Know straight away whether a movement is right, see improvement week by week, and stay motivated to finish the programme.</p></div>
+                </div>
+            </div>
+        </section>
+
+        <section class="report">
+            <div class="wrap">
+                <div class="ph" data-slot="report.jpg">
+                    <img src="/assets/report.jpeg" alt="A progress report and charts on screen" onerror="this.remove()">
+                </div>
+                <div>
+                    <h2>Proof of progress, in a form everyone understands</h2>
+                    <p>Every session adds to a clear timeline of the patient's recovery. Trends, comparisons and summaries are built for you, so a review appointment starts with facts instead of recollections.</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <div class="wrap">
+            <span>{{ app_name }}, an in-clinic rehabilitation assistant.</span>
+        </div>
+    </footer>
+</body>
+</html>

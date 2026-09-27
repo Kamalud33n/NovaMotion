@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Session - NovaMotion</title>
+    <link rel="stylesheet" href="/static/style.css?v=2">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="/static/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="/static/session.css?v=1">
+</head>
+<body>
+<div class="app-container">
+
+    <!-- Sidebar -->
+    <aside class="sidebar glass-effect">
+        <div class="sidebar-header">
+            <div class="logo-container">
+                <img class="logo-icon" src="/assets/logo.png?v=2" alt="MedNova logo" width="44" height="44">
+                <div class="logo-text">
+                    <span class="logo-title">MedNova</span>
+                    <span class="logo-subtitle">Therapy System</span>
+                </div>
+            </div>
+        </div>
+        <nav class="sidebar-nav">
+            <a href="/dashboard" class="nav-item"><i class="fas fa-th-large"></i><span>Dashboard</span></a>
+            <a href="/patients"  class="nav-item"><i class="fas fa-users"></i><span>Patients</span></a>
+            <a href="/session"   class="nav-item active"><i class="fas fa-video"></i><span>Start Session</span></a>
+            <a href="/reports"   class="nav-item"><i class="fas fa-file-alt"></i><span>Reports</span></a>
+            <a href="/analytics" class="nav-item"><i class="fas fa-chart-line"></i><span>Analysis</span></a>
+            <a href="/settings"        class="nav-item"><i class="fas fa-cog"></i><span>Settings</span></a>
+        </nav>
+        <div class="sidebar-footer">
+            <div class="status-indicator">
+                <span class="status-dot online"></span>
+                <span class="status-text">System Online</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main-content">
+        <header class="top-bar glass-effect">
+            <div class="top-bar-left">
+                <button class="menu-toggle" id="menuToggle"><i class="fas fa-bars"></i></button>
+                <div class="breadcrumb">
+                    <span>Home</span><i class="fas fa-chevron-right"></i>
+                    <span class="active">Session</span>
+                </div>
+            </div>
+            <div class="top-bar-right">
+                <div class="patient-selector">
+                    <select id="sessionPatientSelect" class="glass-select">
+                        <option value="">Select Patient</option>
+                    </select>
+                </div>
+                <div class="status-badge" id="sessionStatus">
+                    <span class="badge-dot" id="statusDot"></span>
+                    <span id="statusText">Ready</span>
+                </div>
+                <div class="camera-status" id="cameraStatus">
+                    <i class="fas fa-camera"></i>
+                    <span id="cameraStatusText">Disconnected</span>
+                </div>
+                <button class="logout-btn" onclick="handleLogout()">
+                    <i class="fas fa-sign-out-alt"></i>
+                </button>
+            </div>
+        </header>
+
+        <div class="content-area">
+            <div class="session-container">
+
+                <!-- Camera -->
+                <div class="camera-section glass-effect">
+                    <div class="camera-header">
+                        <h3>Live Pose Analysis</h3>
+                        <div class="camera-controls">
+                            <button id="startSessionBtn" class="btn-primary" onclick="startSession()">
+                                <i class="fas fa-play"></i> Start Session
+                            </button>
+                            <button id="stopSessionBtn" class="btn-danger" onclick="stopSession()" style="display:none">
+                                <i class="fas fa-stop"></i> Stop Session
+                            </button>
+                            <button class="btn-secondary" onclick="toggleCamera()">
+                                <i class="fas fa-camera"></i> Camera
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="game-stage" id="gameStage">
+                    <div class="camera-container">
+                        <!-- Fullscreen toggle — lets the patient see the game on the full screen -->
+                        <button class="game-fullscreen-btn" id="gameFullscreenBtn" onclick="toggleGameFullscreen()" title="Fullscreen for patient">
+                            <i class="fas fa-expand" id="gameFullscreenIcon"></i>
+                        </button>
+
+                        <!--  MJPEG stream — browser decodes natively, no canvas/JS drawing needed -->
+                        <img id="poseStream" alt="Live pose stream" style="display:none">
+
+                        <!-- Game render surface (Rehab Runner etc.) — shown instead of the raw
+                             pose stream while a game is being played; poseStream keeps running
+                             hidden behind it so the camera/pose pipeline stays alive. -->
+                        <canvas id="gameCanvas" width="900" height="460"></canvas>
+
+                        <!-- Pose badges -->
+                        <div class="pose-badges" id="poseBadges" style="display:none">
+                            <div class="pose-badge green"  id="badge_l_shoulder" data-joint="shoulder" data-side="left"><i class="fas fa-circle" style="font-size:7px"></i> L.Shoulder: --°</div>
+                            <div class="pose-badge blue"   id="badge_r_shoulder" data-joint="shoulder" data-side="right"><i class="fas fa-circle" style="font-size:7px"></i> R.Shoulder: --°</div>
+                            <div class="pose-badge orange" id="badge_l_elbow"    data-joint="elbow"    data-side="left">   <i class="fas fa-circle" style="font-size:7px"></i> L.Elbow: --°</div>
+                            <div class="pose-badge purple" id="badge_r_elbow"    data-joint="elbow"    data-side="right">   <i class="fas fa-circle" style="font-size:7px"></i> R.Elbow: --°</div>
+                            <div class="pose-badge green"  id="badge_l_knee"     data-joint="knee"     data-side="left">    <i class="fas fa-circle" style="font-size:7px"></i> L.Knee: --°</div>
+                            <div class="pose-badge blue"   id="badge_r_knee"     data-joint="knee"     data-side="right">    <i class="fas fa-circle" style="font-size:7px"></i> R.Knee: --°</div>
+                        </div>
+
+                        <!-- Countdown ring -->
+                        <div class="timer-ring-wrap" id="timerRing">
+                            <svg class="timer-svg" width="72" height="72" viewBox="0 0 72 72">
+                                <circle class="timer-bg"   cx="36" cy="36" r="30"/>
+                                <circle class="timer-fill" id="timerArc" cx="36" cy="36" r="30"
+                                        stroke-dasharray="188.5" stroke-dashoffset="0"/>
+                            </svg>
+                            <div class="timer-text" id="timerText">0:00</div>
+                        </div>
+
+                        <!-- Recording -->
+                        <div class="recording-indicator" id="recIndicator">
+                            <div class="rec-dot"></div> REC
+                        </div>
+
+                        <!-- No pose -->
+                        <div class="no-pose-warning" id="noPoseWarning">
+                            ⚠ No pose detected — move into frame
+                        </div>
+
+                        <!-- Placeholder -->
+                        <div id="cameraPlaceholder" class="camera-placeholder">
+                            <i class="fas fa-video fa-3x"></i>
+                            <p>Click "Camera" to start</p>
+                        </div>
+                    </div>
+
+                    <!-- Patient's raw camera feed, shown only in Game mode — poseStream
+                         itself gets moved in here by JS (see showGameCanvas/hideGameCanvas)
+                         so there's only ever one live MJPEG connection. -->
+                    <div class="patient-video-panel" id="patientVideoPanel">
+                        <div class="panel-label"><i class="fas fa-user"></i> Patient Camera</div>
+                    </div>
+                    </div>
+
+                    <div class="camera-stats">
+                        <div class="stat-item">
+                            <span class="stat-label">FPS</span>
+                            <span class="stat-value" id="fpsDisplay">--</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Detected</span>
+                            <span class="stat-value" id="detectionStatus">No</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Elapsed</span>
+                            <span class="stat-value" id="sessionTimer">00:00</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Remaining</span>
+                            <span class="stat-value" id="remainingTimer" style="color:#D68F35">--:--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ══════════════ SESSION CONFIGURATION (single merged card — fields switch with mode) ══════════════ -->
+                <div class="exercise-section glass-effect">
+                    <div class="exercise-header">
+                        <h3>Session Configuration</h3>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Session Type</label>
+                        <div class="duration-selector" id="modeSelector">
+                            <button class="dur-btn active" data-mode="exercise" onclick="selectSessionMode(this,'exercise')">
+                                <i class="fas fa-dumbbell"></i> Exercise
+                            </button>
+                            <button class="dur-btn" data-mode="game" onclick="selectSessionMode(this,'game')">
+                                <i class="fas fa-gamepad"></i> Game
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Exercise config fields -->
+                    <div class="exercise-controls" id="exerciseConfigFields">
+                        <div class="form-group">
+                            <label>Exercise Type</label>
+                            <select id="exerciseType" class="form-input">
+                                <option value="Shoulder Rehab">Shoulder Rehab</option>
+                                <option value="Elbow Rehab">Elbow Rehab</option>
+                                <option value="Hand Rehab">Hand Rehab</option>
+                                <option value="Hand Grip Exercise">Hand Grip Exercise (Finger Flexion)</option>
+                                <option value="Hip Rehab">Hip Rehab</option>
+                                <option value="Knee Rehab">Knee Rehab</option>
+                                <option value="Leg Rehab">Leg Rehab</option>
+                                <option value="Ankle Rehab">Ankle Rehab</option>
+                                <option value="Balance Exercise">Balance Exercise</option>
+                                <option value="Squat">Squat</option>
+                                <option value="Arm Raise">Arm Raise</option>
+                                <option value="Shoulder Flexion">Shoulder Flexion</option>
+                                <option value="Knee Flexion">Knee Flexion</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label>Side</label>
+                            <div class="duration-selector" id="sideSelector">
+                                <button class="dur-btn active" data-side="both"  onclick="selectSide(this,'both')">Both</button>
+                                <button class="dur-btn"        data-side="left"  onclick="selectSide(this,'left')">Left</button>
+                                <button class="dur-btn"        data-side="right" onclick="selectSide(this,'right')">Right</button>
+                            </div>
+                        </div>
+
+                        <!-- Duration selector -->
+                        <div class="form-group">
+                            <label>Session Duration</label>
+                            <div class="duration-selector" id="durationSelector">
+                                <button class="dur-btn active" data-sec="60"  onclick="selectDuration(this,60)">1 min</button>
+                                <button class="dur-btn"        data-sec="120" onclick="selectDuration(this,120)">2 min</button>
+                                <button class="dur-btn"        data-sec="300" onclick="selectDuration(this,300)">5 min</button>
+                                <button class="dur-btn"        data-sec="0"   onclick="selectDuration(this,0)">Custom</button>
+                            </div>
+                            <div class="custom-dur-wrap" id="customDurWrap">
+                                <input type="number" id="customDurInput" min="1" max="60" value="3" placeholder="min">
+                                <span style="font-size:13px;color:var(--text-secondary)">minutes</span>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label>Target Repetitions</label>
+                            <input type="number" id="targetReps" class="form-input" value="10" min="1" max="50">
+                        </div>
+                        <div class="form-group">
+                            <label>Target ROM (°)</label>
+                            <input type="number" id="targetRom" class="form-input" value="90" min="10" max="180">
+                        </div>
+                    </div>
+
+                    <!-- Game config fields -->
+                    <div class="exercise-controls" id="gameConfigFields" style="display:none">
+                        <div class="form-group">
+                            <label>Select Game</label>
+                            <select id="gameType" class="form-input">
+                                <option value="">Loading games...</option>
+                            </select>
+                        </div>
+                        <div class="form-group" id="gameDescriptionWrap" style="display:none">
+                            <label>&nbsp;</label>
+                            <div class="game-description" id="gameDescription"></div>
+                        </div>
+
+                        <!-- Duration selector (reuses exercise mode's pattern) -->
+                        <div class="form-group">
+                            <label>Session Duration</label>
+                            <div class="duration-selector" id="gameDurationSelector">
+                                <button class="dur-btn" data-sec="60"  onclick="selectGameDuration(this,60)">1 min</button>
+                                <button class="dur-btn" data-sec="120" onclick="selectGameDuration(this,120)">2 min</button>
+                                <button class="dur-btn" data-sec="300" onclick="selectGameDuration(this,300)">5 min</button>
+                                <button class="dur-btn active" data-sec="0" onclick="selectGameDuration(this,0)">No Limit</button>
+                            </div>
+                            <div class="custom-dur-wrap" id="gameCustomDurWrap" style="display:none">
+                                <input type="number" id="gameCustomDurInput" min="1" max="60" value="3" placeholder="min">
+                                <span style="font-size:13px;color:var(--text-secondary)">minutes</span>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label>Target Steps</label>
+                            <input type="number" id="targetSteps" class="form-input" value="30" min="0" max="500" placeholder="0 = no target">
+                        </div>
+                    </div>
+                </div>
+                <!-- ══════════════ /SESSION CONFIGURATION ══════════════ -->
+
+                <!-- ══════════════ LIVE ANALYTICS (single merged card — fields switch with mode) ══════════════ -->
+                <div class="analytics-section glass-effect">
+                    <div class="analytics-header"><h3>Live Analytics</h3></div>
+
+                    <!-- Exercise analytics fields -->
+                    <div id="exerciseAnalyticsFields">
+                        <div class="analytics-grid">
+                            <div class="analytics-card">
+                                <span class="analytics-label">Repetitions</span>
+                                <span class="analytics-value" id="repCounter">0 / 0</span>
+                                <div class="progress-bar"><div class="progress-fill" id="repProgress" style="width:0%"></div></div>
+                            </div>
+                            <div class="analytics-card">
+                                <span class="analytics-label">Accuracy</span>
+                                <span class="analytics-value" id="accuracyDisplay">0%</span>
+                                <div class="progress-bar"><div class="progress-fill" id="accuracyProgress" style="width:0%"></div></div>
+                            </div>
+                            <div class="analytics-card">
+                                <span class="analytics-label">Range of Motion</span>
+                                <span class="analytics-value" id="romDisplay">0°</span>
+                                <div class="progress-bar"><div class="progress-fill" id="romProgress" style="width:0%"></div></div>
+                            </div>
+                            <div class="analytics-card">
+                                <span class="analytics-label">Stability</span>
+                                <span class="analytics-value" id="stabilityDisplay">0%</span>
+                                <div class="progress-bar"><div class="progress-fill" id="stabilityProgress" style="width:0%"></div></div>
+                            </div>
+                        </div>
+
+                        <div class="feedback-display" id="feedbackDisplay">
+                            <div class="feedback-message">
+                                <i class="fas fa-info-circle"></i>
+                                <span>Start session to receive feedback</span>
+                            </div>
+                        </div>
+
+                        <div class="joint-angles">
+                            <h4>Joint Angles</h4>
+                            <div class="angle-grid">
+                                <div class="angle-item" data-joint="shoulder" data-side="left"><span class="angle-label">Left Shoulder</span> <span class="angle-value" id="leftShoulderAngle">--°</span></div>
+                                <div class="angle-item" data-joint="shoulder" data-side="right"><span class="angle-label">Right Shoulder</span><span class="angle-value" id="rightShoulderAngle">--°</span></div>
+                                <div class="angle-item" data-joint="elbow" data-side="left"><span class="angle-label">Left Elbow</span>    <span class="angle-value" id="leftElbowAngle">--°</span></div>
+                                <div class="angle-item" data-joint="elbow" data-side="right"><span class="angle-label">Right Elbow</span>   <span class="angle-value" id="rightElbowAngle">--°</span></div>
+                                <div class="angle-item" data-joint="knee" data-side="left"><span class="angle-label">Left Knee</span>     <span class="angle-value" id="leftKneeAngle">--°</span></div>
+                                <div class="angle-item" data-joint="knee" data-side="right"><span class="angle-label">Right Knee</span>    <span class="angle-value" id="rightKneeAngle">--°</span></div>
+                                <div class="angle-item" data-joint="finger"><span class="angle-label">Index Finger</span> <span class="angle-value" id="indexFingerAngle">--°</span></div>
+                                <div class="angle-item" data-joint="finger"><span class="angle-label">Middle Finger</span><span class="angle-value" id="middleFingerAngle">--°</span></div>
+                                <div class="angle-item" data-joint="finger"><span class="angle-label">Ring Finger</span>  <span class="angle-value" id="ringFingerAngle">--°</span></div>
+                                <div class="angle-item" data-joint="finger"><span class="angle-label">Pinky Finger</span> <span class="angle-value" id="pinkyFingerAngle">--°</span></div>
+                                <div class="angle-item" data-joint="finger"><span class="angle-label">Thumb</span>       <span class="angle-value" id="thumbFingerAngle">--°</span></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Game analytics fields -->
+                    <div id="gameAnalyticsFields" style="display:none">
+                        <div class="analytics-grid">
+                            <div class="analytics-card">
+                                <span class="analytics-label">Steps</span>
+                                <span class="analytics-value" id="gameStepsDisplay">0 / 0</span>
+                                <div class="progress-bar"><div class="progress-fill" id="gameStepsProgress" style="width:0%"></div></div>
+                            </div>
+                            <div class="analytics-card">
+                                <span class="analytics-label">Lane Position</span>
+                                <span class="analytics-value" id="gameLaneDisplay">Center</span>
+                            </div>
+                            <div class="analytics-card">
+                                <span class="analytics-label">Crouch</span>
+                                <span class="analytics-value" id="gameCrouchDisplay">No</span>
+                            </div>
+                            <div class="analytics-card">
+                                <span class="analytics-label">Calibration</span>
+                                <span class="analytics-value" id="gameCalibDisplay">Not started</span>
+                                <div class="progress-bar"><div class="progress-fill" id="gameCalibProgress" style="width:0%"></div></div>
+                            </div>
+                        </div>
+
+                        <div class="feedback-display" id="gameFeedbackDisplay">
+                            <div class="feedback-message">
+                                <i class="fas fa-info-circle"></i>
+                                <span>Select a game and press Start Session</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <!-- ══════════════ /LIVE ANALYTICS ══════════════ -->
+
+            </div>
+        </div>
+    </main>
+</div>
+
+<!-- Session Result Modal -->
+<div class="result-modal" id="resultModal">
+    <div class="result-card">
+        <div class="result-header">
+            <div class="result-icon"><i class="fas fa-trophy"></i></div>
+            <h2>Session Complete!</h2>
+            <p id="resultSubtitle">Great work — here's your summary</p>
+        </div>
+
+        <!-- Summary stats -->
+        <div class="result-stats">
+            <div class="result-stat">
+                <div class="val" id="res_duration">0:00</div>
+                <div class="lbl">Duration</div>
+            </div>
+            <div class="result-stat">
+                <div class="val" id="res_accuracy" style="color:#1D8A6D">0%</div>
+                <div class="lbl">Avg Accuracy</div>
+            </div>
+            <div class="result-stat">
+                <div class="val" id="res_rom" style="color:#3E6FD9">0°</div>
+                <div class="lbl">Avg ROM</div>
+            </div>
+            <div class="result-stat">
+                <div class="val" id="res_stability" style="color:#8B5FC7">0%</div>
+                <div class="lbl">Avg Stability</div>
+            </div>
+        </div>
+
+        <!-- Progress chart over time -->
+        <div class="result-chart-wrap">
+            <canvas id="resultChart"></canvas>
+        </div>
+
+        <div class="result-actions">
+            <button class="btn-primary" onclick="closeResult()">
+                <i class="fas fa-redo"></i> New Session
+            </button>
+            <button class="btn-secondary" onclick="window.location.href='/reports'">
+                <i class="fas fa-file-alt"></i> View Reports
+            </button>
+            <button class="btn-secondary" onclick="window.location.href='/dashboard'">
+                <i class="fas fa-th-large"></i> Dashboard
+            </button>
+        </div>
+    </div>
+</div>
+
+<script src="/static/session.js?v=2" defer></script>
+
+
+</body>
+</html>

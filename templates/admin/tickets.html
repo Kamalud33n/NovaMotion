@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tickets - {{ app_name }}</title>
+    <link rel="stylesheet" href="/static/style.css?v=2">
+    <link rel="stylesheet" href="/static/admin/admin.css?v=1">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="app-container">
+        {% include "admin/_sidebar.html" %}
+
+        <main class="main-content">
+            <header class="top-bar glass-effect">
+                <div class="top-bar-left">
+                    <button class="menu-toggle" id="menuToggle"><i class="fas fa-bars"></i></button>
+                    <div class="breadcrumb">
+                        <span>Admin</span>
+                        <i class="fas fa-chevron-right"></i>
+                        <span class="active">Tickets</span>
+                    </div>
+                </div>
+                <div class="top-bar-right">
+                    <button class="logout-btn" onclick="handleLogout()">
+                        <i class="fas fa-sign-out-alt"></i>
+                    </button>
+                </div>
+            </header>
+
+            <div class="content-area">
+                <div class="patients-header">
+                    <div class="header-left">
+                        <h2>Tickets</h2>
+                        <div class="header-subtitle" id="ticketCountText">Loading...</div>
+                    </div>
+                    <div class="header-right filter-bar">
+                        <div class="search-box">
+                            <i class="fas fa-search"></i>
+                            <input type="text" id="searchInput" placeholder="Search subject or user...">
+                        </div>
+                        <select id="statusFilter" class="filter-select">
+                            <option value="">All Statuses</option>
+                            <option value="open">Open</option>
+                            <option value="in_progress">In Progress</option>
+                            <option value="resolved">Resolved</option>
+                            <option value="closed">Closed</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div id="ticketsList" style="display:flex; flex-direction:column; gap:14px;">
+                    <div class="activity-empty"><i class="fas fa-spinner fa-spin"></i><span>Loading tickets...</span></div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Ticket detail / manage modal -->
+    <div class="modal" id="ticketModal">
+        <div class="modal-content glass-effect profile-modal-content">
+            <div class="modal-header">
+                <h3 id="ticketModalSubject">Ticket</h3>
+                <button class="modal-close" onclick="closeTicketModal()"><i class="fas fa-times"></i></button>
+            </div>
+
+            <div id="ticketModalBody" style="display:flex; flex-direction:column; gap:18px;"></div>
+
+            <form id="ticketForm" onsubmit="submitTicketForm(event)" style="margin-top:18px;">
+                <input type="hidden" id="t_id">
+                <div class="form-group" style="margin-bottom:14px;">
+                    <label>Status</label>
+                    <select id="t_status" class="form-input">
+                        <option value="open">Open</option>
+                        <option value="in_progress">In Progress</option>
+                        <option value="resolved">Resolved</option>
+                        <option value="closed">Closed</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Response to user</label>
+                    <textarea id="t_response" class="form-input" rows="4" placeholder="Write a reply or resolution note..."></textarea>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn-secondary" onclick="closeTicketModal()">Close</button>
+                    <button type="submit" class="btn-primary" id="ticketFormSubmitBtn">
+                        <i class="fas fa-save"></i> Save
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+    <script src="/static/admin/admin.js"></script>
+    <script>
+    let _allTickets = [];
+
+    document.addEventListener('DOMContentLoaded', () => {
+        loadTickets();
+        document.getElementById('searchInput').addEventListener('input', debounce(loadTickets, 300));
+        document.getElementById('statusFilter').addEventListener('change', loadTickets);
+    });
+
+    function debounce(fn, ms) {
+        let t;
+        return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+    }
+
+    async function loadTickets() {
+        const search = document.getElementById('searchInput').value.trim();
+        const status = document.getElementById('statusFilter').value;
+        const params = new URLSearchParams();
+        if (search) params.set('search', search);
+        if (status) params.set('status', status);
+
+        try {
+            _allTickets = await apiRequest('/api/admin/tickets?' + params.toString());
+            document.getElementById('ticketCountText').textContent =
+                `${_allTickets.length} ticket${_allTickets.length === 1 ? '' : 's'}`;
+            renderTickets(_allTickets);
+        } catch (e) {
+            console.error('loadTickets:', e);
+            document.getElementById('ticketsList').innerHTML =
+                '<p style="color:#D9503E;padding:1rem;">Failed to load tickets.</p>';
+        }
+    }
+
+    function renderTickets(rows) {
+        const el = document.getElementById('ticketsList');
+        if (!rows.length) {
+            el.innerHTML = `
+                <div class="activity-empty">
+                    <i class="fas fa-life-ring"></i>
+                    <strong>No tickets found</strong>
+                    <span class="empty-sub">Support requests raised by doctors and therapists will show up here.</span>
+                </div>`;
+            return;
+        }
+        el.innerHTML = rows.map(t => `
+            <div class="ticket-card glass-effect" onclick="openTicketModal(${t.id})">
+                <div class="ticket-card-top">
+                    <div class="ticket-subject">${escapeHtml(t.subject)}</div>
+                    ${statusBadge(t.status)}
+                </div>
+                <div class="ticket-preview">${escapeHtml(t.message)}</div>
+                <div class="ticket-meta">
+                    <span><i class="fas fa-user"></i> ${escapeHtml(t.user_name)} (${t.user_role || 'user'})</span>
+                    <span><i class="fas fa-clock"></i> ${timeAgo(t.created_at)}</span>
+                </div>
+            </div>
+        `).join('');
+    }
+
+    function openTicketModal(id) {
+        const t = _allTickets.find(x => x.id === id);
+        if (!t) return;
+
+        document.getElementById('ticketModalSubject').textContent = t.subject;
+        document.getElementById('ticketModalBody').innerHTML = `
+            <div class="patient-meta profile-contact-meta">
+                <span><i class="fas fa-user"></i> ${escapeHtml(t.user_name)}</span>
+                <span><i class="fas fa-envelope"></i> ${escapeHtml(t.user_email || '')}</span>
+                <span><i class="fas fa-clock"></i> ${timeAgo(t.created_at)}</span>
+            </div>
+            <div class="detail-row" style="flex-direction:column;align-items:flex-start;gap:6px;">
+                <div class="detail-label">Message</div>
+                <div class="detail-value" style="white-space:pre-wrap;">${escapeHtml(t.message)}</div>
+            </div>
+        `;
+
+        document.getElementById('t_id').value = t.id;
+        document.getElementById('t_status').value = t.status;
+        document.getElementById('t_response').value = t.admin_response || '';
+
+        document.getElementById('ticketModal').classList.add('active');
+    }
+
+    function closeTicketModal() {
+        document.getElementById('ticketModal').classList.remove('active');
+    }
+
+    async function submitTicketForm(evt) {
+        evt.preventDefault();
+        const id = document.getElementById('t_id').value;
+        const btn = document.getElementById('ticketFormSubmitBtn');
+        const payload = {
+            status: document.getElementById('t_status').value,
+            admin_response: document.getElementById('t_response').value,
+        };
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...';
+        try {
+            await apiRequest(`/api/admin/tickets/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
+            showToast('Ticket updated', 'success');
+            closeTicketModal();
+            loadTickets();
+        } catch (e) {
+            console.error('submitTicketForm:', e);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-save"></i> Save';
+        }
+    }
+    </script>
+</body>
+</html>

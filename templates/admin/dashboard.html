@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard - {{ app_name }}</title>
+    <link rel="stylesheet" href="/static/style.css?v=2">
+    <link rel="stylesheet" href="/static/admin/admin.css?v=1">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="/static/chart.umd.min.js"></script>
+    <style>
+        .content-area { display: flex; flex-direction: column; gap: 28px; }
+        .charts-row { grid-template-columns: 1.3fr 1fr; }
+        @media (max-width: 1024px) { .charts-row { grid-template-columns: 1fr; } }
+
+        .list-panel { padding: 24px; border-radius: var(--card-radius); border: 1px solid rgba(0,0,0,0.04); }
+        .list-panels-row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+        @media (max-width: 1024px) { .list-panels-row { grid-template-columns: 1fr; } }
+
+        .mini-row {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 12px; padding: 12px 0; border-bottom: 1px solid rgba(0,0,0,0.04);
+        }
+        .mini-row:last-child { border-bottom: none; }
+        .mini-user { display: flex; align-items: center; gap: 12px; min-width: 0; }
+        .mini-user .patient-avatar { width: 38px; height: 38px; font-size: 13px; flex-shrink: 0; }
+        .mini-user-text { min-width: 0; }
+        .mini-user-name { font-size: 14px; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .mini-user-sub { font-size: 12px; color: var(--text-light); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        {% include "admin/_sidebar.html" %}
+
+        <main class="main-content">
+            <header class="top-bar glass-effect">
+                <div class="top-bar-left">
+                    <button class="menu-toggle" id="menuToggle"><i class="fas fa-bars"></i></button>
+                    <div class="breadcrumb">
+                        <span>Admin</span>
+                        <i class="fas fa-chevron-right"></i>
+                        <span class="active">Dashboard</span>
+                    </div>
+                </div>
+                <div class="top-bar-right">
+                    <button class="logout-btn" onclick="handleLogout()">
+                        <i class="fas fa-sign-out-alt"></i>
+                    </button>
+                </div>
+            </header>
+
+            <div class="content-area">
+
+                <div class="stats-grid" id="statsGrid">
+                    <div class="activity-empty"><i class="fas fa-spinner fa-spin"></i><span>Loading statistics...</span></div>
+                </div>
+
+                <div class="charts-row">
+                    <div class="chart-container glass-effect">
+                        <div class="chart-header"><h3>New Registrations (last 14 days)</h3></div>
+                        <div class="canvas-wrapper">
+                            <canvas id="growthChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="chart-container glass-effect">
+                        <div class="chart-header"><h3>Users by Role</h3></div>
+                        <div class="canvas-wrapper">
+                            <canvas id="roleChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="list-panels-row">
+                    <div class="list-panel glass-effect">
+                        <div class="section-header">
+                            <h3>Recent Registrations</h3>
+                            <a href="/admin/users" class="btn-secondary" style="padding:6px 14px;font-size:13px;">View all</a>
+                        </div>
+                        <div id="recentUsers"></div>
+                    </div>
+                    <div class="list-panel glass-effect">
+                        <div class="section-header">
+                            <h3>Recent Tickets</h3>
+                            <a href="/admin/tickets" class="btn-secondary" style="padding:6px 14px;font-size:13px;">View all</a>
+                        </div>
+                        <div id="recentTickets"></div>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+    <script src="/static/admin/admin.js"></script>
+    <script>
+    document.addEventListener('DOMContentLoaded', loadDashboard);
+
+    async function loadDashboard() {
+        try {
+            const data = await apiRequest('/api/admin/dashboard');
+            renderStats(data.statistics);
+            renderGrowthChart(data.registrations_trend);
+            renderRoleChart(data.users_by_role);
+            renderRecentUsers(data.recent_users);
+            renderRecentTickets(data.recent_tickets);
+        } catch (e) {
+            console.error('loadDashboard:', e);
+            document.getElementById('statsGrid').innerHTML =
+                '<p style="color:red;padding:1rem">Failed to load dashboard data.</p>';
+        }
+    }
+
+    function renderStats(s) {
+        const stats = [
+            { icon: 'fa-users',            label: 'Total Users',       value: s.total_users,       color: '#3E6FD9' },
+            { icon: 'fa-user-clock',       label: 'Pending Approvals', value: s.pending_approvals, color: '#D68F35' },
+            { icon: 'fa-user-check',       label: 'Active Users',      value: s.active_users,      color: '#1D8A6D' },
+            { icon: 'fa-user-slash',       label: 'Suspended',         value: s.suspended_users,   color: '#D9503E' },
+            { icon: 'fa-procedures',       label: 'Total Patients',    value: s.total_patients,    color: '#8B5FC7' },
+            { icon: 'fa-video',            label: 'Total Sessions',    value: s.total_sessions,    color: '#1AA6B7' },
+            { icon: 'fa-life-ring',        label: 'Open Tickets',      value: s.open_tickets,      color: '#D9503E' },
+            { icon: 'fa-ticket-alt',       label: 'Total Tickets',     value: s.total_tickets,     color: '#607D8B' },
+        ];
+        document.getElementById('statsGrid').innerHTML = stats.map(st => `
+            <div class="stat-card glass-effect">
+                <div class="stat-icon" style="background:${st.color}20;color:${st.color}">
+                    <i class="fas ${st.icon}"></i>
+                </div>
+                <div class="stat-content">
+                    <span class="stat-value">${st.value}</span>
+                    <span class="stat-label">${st.label}</span>
+                </div>
+            </div>
+        `).join('');
+    }
+
+    function renderGrowthChart(trend) {
+        const ctx = document.getElementById('growthChart')?.getContext('2d');
+        if (!ctx) return;
+        const labels = (trend || []).map(r => r.date.slice(5));
+        const data = (trend || []).map(r => r.count);
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [{
+                    label: 'New users', data,
+                    borderColor: '#1D8A6D', backgroundColor: '#1D8A6D18',
+                    tension: 0.4, fill: true, borderWidth: 3,
+                    pointBackgroundColor: '#1D8A6D', pointBorderColor: '#fff',
+                    pointBorderWidth: 2, pointRadius: 3,
+                }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: 'rgba(0,0,0,0.04)' } },
+                    x: { grid: { display: false }, ticks: { font: { size: 11 }, maxRotation: 45 } }
+                }
+            }
+        });
+    }
+
+    function renderRoleChart(byRole) {
+        const ctx = document.getElementById('roleChart')?.getContext('2d');
+        if (!ctx) return;
+        const entries = Object.entries(byRole || {});
+        new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: entries.map(([r]) => r[0].toUpperCase() + r.slice(1)),
+                datasets: [{
+                    data: entries.map(([, v]) => v),
+                    backgroundColor: ['#1D8A6D', '#3E6FD9', '#8B5FC7'],
+                    borderColor: '#fff', borderWidth: 3, hoverOffset: 8,
+                }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false, cutout: '65%',
+                plugins: { legend: { position: 'bottom', labels: { padding: 16, usePointStyle: true, pointStyle: 'circle', font: { size: 12 } } } }
+            }
+        });
+    }
+
+    function renderRecentUsers(rows) {
+        const el = document.getElementById('recentUsers');
+        if (!rows || !rows.length) {
+            el.innerHTML = '<p style="padding:1rem 0;color:var(--text-light)">No registrations yet.</p>';
+            return;
+        }
+        el.innerHTML = rows.map(u => `
+            <div class="mini-row">
+                <div class="mini-user">
+                    <div class="patient-avatar">${initials(u.full_name)}</div>
+                    <div class="mini-user-text">
+                        <div class="mini-user-name">${escapeHtml(u.full_name)}</div>
+                        <div class="mini-user-sub">${escapeHtml(u.email)}</div>
+                    </div>
+                </div>
+                ${statusBadge(u.status)}
+            </div>
+        `).join('');
+    }
+
+    function renderRecentTickets(rows) {
+        const el = document.getElementById('recentTickets');
+        if (!rows || !rows.length) {
+            el.innerHTML = '<p style="padding:1rem 0;color:var(--text-light)">No tickets yet.</p>';
+            return;
+        }
+        el.innerHTML = rows.map(t => `
+            <div class="mini-row">
+                <div class="mini-user-text" style="flex:1;min-width:0;">
+                    <div class="mini-user-name">${escapeHtml(t.subject)}</div>
+                    <div class="mini-user-sub">${escapeHtml(t.user_name)} \u00b7 ${timeAgo(t.created_at)}</div>
+                </div>
+                ${statusBadge(t.status)}
+            </div>
+        `).join('');
+    }
+    </script>
+</body>
+</html>

@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Management - {{ app_name }}</title>
+    <link rel="stylesheet" href="/static/style.css?v=2">
+    <link rel="stylesheet" href="/static/admin/admin.css?v=1">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="app-container">
+        {% include "admin/_sidebar.html" %}
+
+        <main class="main-content">
+            <header class="top-bar glass-effect">
+                <div class="top-bar-left">
+                    <button class="menu-toggle" id="menuToggle"><i class="fas fa-bars"></i></button>
+                    <div class="breadcrumb">
+                        <span>Admin</span>
+                        <i class="fas fa-chevron-right"></i>
+                        <span class="active">User Management</span>
+                    </div>
+                </div>
+                <div class="top-bar-right">
+                    <button class="logout-btn" onclick="handleLogout()">
+                        <i class="fas fa-sign-out-alt"></i>
+                    </button>
+                </div>
+            </header>
+
+            <div class="content-area">
+                <div class="patients-header">
+                    <div class="header-left">
+                        <h2>User Management</h2>
+                        <div class="header-subtitle" id="userCountText">Loading...</div>
+                    </div>
+                    <div class="header-right filter-bar">
+                        <div class="search-box">
+                            <i class="fas fa-search"></i>
+                            <input type="text" id="searchInput" placeholder="Search by name, email or phone...">
+                        </div>
+                        <select id="roleFilter" class="filter-select">
+                            <option value="">All Roles</option>
+                            <option value="admin">Admin</option>
+                            <option value="doctor">Doctor</option>
+                            <option value="therapist">Therapist</option>
+                        </select>
+                        <select id="statusFilter" class="filter-select">
+                            <option value="">All Statuses</option>
+                            <option value="approved">Approved</option>
+                            <option value="pending">Pending</option>
+                            <option value="rejected">Rejected</option>
+                            <option value="suspended">Suspended</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="admin-table-wrap glass-effect">
+                    <div class="table-container">
+                        <table class="report-table">
+                            <thead>
+                                <tr>
+                                    <th>User</th>
+                                    <th>Role</th>
+                                    <th>Status</th>
+                                    <th>Joined</th>
+                                    <th>Last Login</th>
+                                    <th style="text-align:right;">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="usersTableBody">
+                                <tr><td colspan="6" class="text-center" style="padding:2rem;"><i class="fas fa-spinner fa-spin"></i> Loading users...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Edit User Modal -->
+    <div class="modal" id="userModal">
+        <div class="modal-content glass-effect">
+            <div class="modal-header">
+                <h3>Edit User</h3>
+                <button class="modal-close" onclick="closeUserModal()"><i class="fas fa-times"></i></button>
+            </div>
+
+            <form id="userForm" onsubmit="submitUserForm(event)">
+                <input type="hidden" id="u_id">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+                    <div class="form-group">
+                        <label>Full Name</label>
+                        <input type="text" id="u_full_name" class="form-input" disabled>
+                    </div>
+                    <div class="form-group">
+                        <label>Email</label>
+                        <input type="text" id="u_email" class="form-input" disabled>
+                    </div>
+                    <div class="form-group">
+                        <label>Phone</label>
+                        <input type="text" id="u_phone" class="form-input" disabled>
+                    </div>
+                    <div class="form-group">
+                        <label>Specialization</label>
+                        <input type="text" id="u_specialization" class="form-input" disabled>
+                    </div>
+                    <div class="form-group">
+                        <label>Status</label>
+                        <select id="u_status" class="form-input">
+                            <option value="approved">Approved</option>
+                            <option value="pending">Pending</option>
+                            <option value="rejected">Rejected</option>
+                            <option value="suspended">Suspended</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn-danger" id="deleteUserBtn" onclick="deleteUserFromModal()">
+                        <i class="fas fa-trash"></i> Delete
+                    </button>
+                    <div style="flex:1;"></div>
+                    <button type="button" class="btn-secondary" onclick="closeUserModal()">Cancel</button>
+                    <button type="submit" class="btn-primary" id="userFormSubmitBtn">
+                        <i class="fas fa-save"></i> Save Changes
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+    <script src="/static/admin/admin.js"></script>
+    <script>
+    let _me = null;
+    let _allUsers = [];
+
+    document.addEventListener('DOMContentLoaded', async () => {
+        try { _me = await apiRequest('/api/auth/me'); } catch (e) {}
+        loadUsers();
+        document.getElementById('searchInput').addEventListener('input', debounce(loadUsers, 300));
+        document.getElementById('roleFilter').addEventListener('change', loadUsers);
+        document.getElementById('statusFilter').addEventListener('change', loadUsers);
+    });
+
+    function debounce(fn, ms) {
+        let t;
+        return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+    }
+
+    async function loadUsers() {
+        const search = document.getElementById('searchInput').value.trim();
+        const role = document.getElementById('roleFilter').value;
+        const status = document.getElementById('statusFilter').value;
+        const params = new URLSearchParams();
+        if (search) params.set('search', search);
+        if (role) params.set('role', role);
+        if (status) params.set('status', status);
+
+        try {
+            _allUsers = await apiRequest('/api/admin/users?' + params.toString());
+            document.getElementById('userCountText').textContent =
+                `${_allUsers.length} user${_allUsers.length === 1 ? '' : 's'}`;
+            renderUsers(_allUsers);
+        } catch (e) {
+            console.error('loadUsers:', e);
+            document.getElementById('usersTableBody').innerHTML =
+                '<tr><td colspan="6" class="text-center" style="padding:2rem;color:#D9503E;">Failed to load users.</td></tr>';
+        }
+    }
+
+    function renderUsers(rows) {
+        const body = document.getElementById('usersTableBody');
+        if (!rows.length) {
+            body.innerHTML = '<tr><td colspan="6" class="text-center" style="padding:2rem;color:var(--text-light);">No users found.</td></tr>';
+            return;
+        }
+        body.innerHTML = rows.map(u => `
+            <tr>
+                <td>
+                    <div class="cell-user">
+                        <div class="patient-avatar">${initials(u.full_name)}</div>
+                        <div>
+                            <div class="cell-user-name">${escapeHtml(u.full_name)}</div>
+                            <div class="cell-user-sub">${escapeHtml(u.email)}</div>
+                        </div>
+                    </div>
+                </td>
+                <td>${roleBadge(u.role)}</td>
+                <td>${statusBadge(u.status)}</td>
+                <td>${u.date_created ? formatDate(u.date_created) : '\u2014'}</td>
+                <td>${u.last_login ? timeAgo(u.last_login) : 'Never'}</td>
+                <td>
+                    <div class="row-actions">
+                        <button class="btn-icon" title="Edit" onclick="openUserModal('${u.id}')"><i class="fas fa-pen"></i></button>
+                    </div>
+                </td>
+            </tr>
+        `).join('');
+    }
+
+    function openUserModal(id) {
+        const u = _allUsers.find(x => x.id === id);
+        if (!u) return;
+        document.getElementById('u_id').value = u.id;
+        document.getElementById('u_full_name').value = u.full_name || '';
+        document.getElementById('u_email').value = u.email || '';
+        document.getElementById('u_phone').value = u.phone || '';
+        document.getElementById('u_specialization').value = u.specialization || '';
+        document.getElementById('u_status').value = u.status;
+
+        const isSelf = _me && _me.id === u.id;
+        document.getElementById('u_status').disabled = isSelf;
+        document.getElementById('deleteUserBtn').style.display = isSelf ? 'none' : 'inline-flex';
+
+        document.getElementById('userModal').classList.add('active');
+    }
+
+    function closeUserModal() {
+        document.getElementById('userModal').classList.remove('active');
+    }
+
+    async function submitUserForm(evt) {
+        evt.preventDefault();
+        const id = document.getElementById('u_id').value;
+        const btn = document.getElementById('userFormSubmitBtn');
+
+        const payload = {};
+        if (!document.getElementById('u_status').disabled) payload.status = document.getElementById('u_status').value;
+
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...';
+        try {
+            await apiRequest(`/api/admin/users/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
+            showToast('User updated', 'success');
+            closeUserModal();
+            loadUsers();
+        } catch (e) {
+            console.error('submitUserForm:', e);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-save"></i> Save Changes';
+        }
+    }
+
+    async function deleteUserFromModal() {
+        const id = document.getElementById('u_id').value;
+        const name = document.getElementById('u_full_name').value;
+        if (!confirm(`Permanently delete ${name}'s account? This cannot be undone.`)) return;
+        try {
+            await apiRequest(`/api/admin/users/${id}`, { method: 'DELETE' });
+            showToast('User deleted', 'success');
+            closeUserModal();
+            loadUsers();
+        } catch (e) {
+            console.error('deleteUserFromModal:', e);
+        }
+    }
+    </script>
+</body>
+</html>
