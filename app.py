@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from database import get_db, init_db
 from models import Patient, SessionModel, JointAngle, Setting
 
-from config import pose as _pose  # for /api/health mediapipe_ready flag
+from config import MEDIAPIPE_READY  # for /api/health mediapipe_ready flag
 from services import mjpeg_camera
 
 from routers import admin, analytics, auth, camera, dashboard, export, pages, patients, reports, sessions, tickets
@@ -48,6 +48,7 @@ app.include_router(dashboard.router, dependencies=clinical)
 app.include_router(analytics.router, dependencies=clinical)
 app.include_router(reports.router,   dependencies=clinical)
 app.include_router(camera.router,    dependencies=clinical)
+app.include_router(camera.ws_router)   # /ws/camera does its own cookie auth (WebSocket)
 app.include_router(tickets.router,   dependencies=clinical)
 app.include_router(export.router,    dependencies=[Depends(require_export_key)])
 
@@ -146,16 +147,16 @@ async def seed():
 # Health check
 @app.get("/api/health")
 async def health():
-    # In-clinic only: one server-attached webcam, one MJPEG pipeline.
     # "camera_running" is what dashboard.html / index.html read for the
-    # Camera Connected/Disconnected badge.
+    # Camera Connected/Disconnected badge: true while any doctor's browser
+    # camera is streaming (or a server-attached camera is running).
     running = mjpeg_camera.is_active()
     return {
         "status":          "healthy",
         "timestamp":       datetime.datetime.now().isoformat(),
         "camera_running":  running,
         "mjpeg_running":   running,
-        "mediapipe_ready": _pose is not None,
+        "mediapipe_ready": MEDIAPIPE_READY,
         "resolution":      "1280x720",
     }
 
@@ -163,4 +164,6 @@ async def health():
 # Entry point 
 if __name__ == "__main__":
     import uvicorn
+    # Keep this a SINGLE process (no `workers=`): each doctor's live session state
+    # (services/user_context.py) is held in this process's memory.
     uvicorn.run(app, host=app_settings.host, port=app_settings.port, reload=False)

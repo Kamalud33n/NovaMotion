@@ -15,6 +15,7 @@ let currentSmoothness = 100;   //  real — from backend frame-jerk variance
 let currentBalance    = 100;   //  real — from backend shoulder-sway variance
 let currentFatigue    = 0;     //  real — from backend rep-quality decline trend
 let repCount         = 0;
+let repsSyncReady    = false;   // true once /api/session/reset has landed, so stale reps from the previous session can't auto-stop this one
 
 let poseDetected     = false;
 let selectedSide     = 'both';   // 'left' / 'right' / 'both' — which limb to track & draw
@@ -90,40 +91,172 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
-// Camera (MJPEG <img> stream, no canvas / no JS drawing)
+// Camera: the browser opens the patient's webcam (getUserMedia), streams frames
+// to the server over a WebSocket (/ws/camera), and shows the annotated frame
+// (skeleton drawn by MediaPipe on the server) in the same <img id="poseStream">.
+// The server needs NO camera, so this works on any deployed (HTTPS) site.
 function toggleCamera() {
     cameraActive ? stopCamera() : startCamera();
+}
+
+const CAM_MAX_W = 640;            // frames are downscaled to this width before sending
+const CAM_JPEG_QUALITY = 0.7;
+const CAM_MIN_INTERVAL_MS = 50;   // cap at ~20 fps
+// Labels of built-in laptop cameras; anything else is treated as an external USB webcam.
+const INTERNAL_CAM_RE = /integrated|built-?in|internal|facetime|laptop|front/i;
+
+let camStream = null, camWs = null, camVideo = null, camCanvas = null, camCtx = null;
+let camPrevUrl = null, camLastSend = 0, camSendTimer = null;
+
+function cameraErrorMessage(e) {
+    if (!window.isSecureContext) return 'Camera needs HTTPS. Open this site with https:// (or localhost).';
+    switch (e && e.name) {
+        case 'NotAllowedError':
+        case 'SecurityError':      return 'Camera permission denied. Allow camera access for this site in the browser settings.';
+        case 'NotFoundError':
+        case 'OverconstrainedError': return 'No camera found on this device.';
+        case 'NotReadableError':
+        case 'AbortError':         return 'Camera is busy (used by another app/tab). Close it and try again.';
+        default:                   return 'Could not start the camera: ' + ((e && e.message) || e);
+    }
+}
+
+// USB webcam first (priority), built-in laptop camera as fallback.
+async function openBestCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        const err = new Error('getUserMedia unavailable');
+        err.name = window.isSecureContext ? 'NotFoundError' : 'SecurityError';
+        throw err;
+    }
+    const size = { width: { ideal: 1280 }, height: { ideal: 720 } };
+    // First call triggers the permission prompt; only after it are device labels visible.
+    let stream = await navigator.mediaDevices.getUserMedia({ video: size, audio: false });
+    try {
+        const cams = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+        if (cams.length > 1) {
+            const currentId = stream.getVideoTracks()[0].getSettings().deviceId;
+            const external = cams.find(d => d.label && !INTERNAL_CAM_RE.test(d.label));
+            if (external && external.deviceId !== currentId) {
+                const better = await navigator.mediaDevices.getUserMedia({
+                    video: { ...size, deviceId: { exact: external.deviceId } }, audio: false,
+                });
+                stream.getTracks().forEach(t => t.stop());
+                stream = better;
+            }
+        }
+    } catch (e) {
+        console.warn('openBestCamera: could not switch to external camera, using default:', e);
+    }
+    return stream;
+}
+
+function camSendFrame() {
+    camSendTimer = null;
+    if (!cameraActive || !camWs || camWs.readyState !== WebSocket.OPEN) return;
+    if (!camVideo || camVideo.readyState < 2 || !camVideo.videoWidth) {   // no frame decoded yet
+        camSendTimer = setTimeout(camSendFrame, 30);
+        return;
+    }
+    // Keep the camera's real aspect ratio (a stretched frame would distort joint angles).
+    const w = Math.min(CAM_MAX_W, camVideo.videoWidth);
+    const h = Math.round(w * camVideo.videoHeight / camVideo.videoWidth);
+    if (camCanvas.width !== w || camCanvas.height !== h) { camCanvas.width = w; camCanvas.height = h; }
+    camCtx.drawImage(camVideo, 0, 0, w, h);
+    camCanvas.toBlob(blob => {
+        if (blob && cameraActive && camWs && camWs.readyState === WebSocket.OPEN) {
+            camLastSend = performance.now();
+            camWs.send(blob);
+        }
+    }, 'image/jpeg', CAM_JPEG_QUALITY);
+}
+
+// Send the next frame only after the previous annotated one came back (no lag build-up).
+function camScheduleNext() {
+    if (camSendTimer) return;
+    const wait = Math.max(0, CAM_MIN_INTERVAL_MS - (performance.now() - camLastSend));
+    camSendTimer = setTimeout(camSendFrame, wait);
+}
+
+function camCleanup() {
+    if (camSendTimer) { clearTimeout(camSendTimer); camSendTimer = null; }
+    if (camWs) {
+        camWs.onopen = camWs.onmessage = camWs.onerror = camWs.onclose = null;
+        try { camWs.close(); } catch (e) {}
+        camWs = null;
+    }
+    if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+    if (camVideo) { camVideo.srcObject = null; camVideo = null; }
+    camCanvas = camCtx = null;
+    if (camPrevUrl) { URL.revokeObjectURL(camPrevUrl); camPrevUrl = null; }
 }
 
 async function startCamera() {
     const img = document.getElementById('poseStream');
 
-    // cache-bust so the browser always opens a fresh MJPEG connection
-    img.src = '/video_feed?t=' + Date.now();
-    img.style.display = 'block';
+    try {
+        camStream = await openBestCamera();
+    } catch (e) {
+        console.error('startCamera:', e);
+        showToast(cameraErrorMessage(e), 'error');
+        camCleanup();
+        return;
+    }
 
-    img.onerror = () => {
-        console.error('poseStream: <img> failed to load /video_feed');
-        showToast('Could not start camera stream. Check server logs.', 'error');
+    camVideo = document.createElement('video');
+    camVideo.muted = true;
+    camVideo.playsInline = true;
+    camVideo.srcObject = camStream;
+    try { await camVideo.play(); } catch (e) { console.warn('video.play():', e); }
+    camCanvas = document.createElement('canvas');
+    camCtx = camCanvas.getContext('2d');
+
+    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${wsProto}://${location.host}/ws/camera`);
+    ws.binaryType = 'blob';
+    camWs = ws;
+
+    let gotFrame = false;
+    ws.onmessage = (ev) => {
+        if (typeof ev.data === 'string') {          // server-side error for one frame, keep going
+            console.warn('camera ws:', ev.data);
+            camScheduleNext();
+            return;
+        }
+        const url = URL.createObjectURL(ev.data);
+        img.src = url;
+        if (!gotFrame) { gotFrame = true; img.style.display = 'block'; }
+        if (camPrevUrl) URL.revokeObjectURL(camPrevUrl);
+        camPrevUrl = url;
+        camScheduleNext();
     };
+    ws.onclose = (ev) => {
+        if (!cameraActive && !camStream) return;    // we closed it ourselves
+        console.error('camera ws closed', ev.code);
+        showToast(ev.code === 4401 ? 'Session expired - please log in again.'
+                                    : 'Camera connection lost. Check your internet and press Camera again.', 'error');
+        if (cameraActive) stopCamera(); else camCleanup();
+    };
+    ws.onopen = () => {
+        cameraActive = true;
+        document.getElementById('cameraPlaceholder').style.display = 'none';
+        document.getElementById('cameraStatusText').textContent    = 'Connected';
+        document.getElementById('cameraStatus').classList.add('active');
+        document.getElementById('poseBadges').style.display        = sessionMode === 'game' ? 'none' : 'flex';
+        document.getElementById('statusText').textContent          = 'Connected';
+        document.getElementById('statusDot').className             = 'badge-dot online';
 
-    cameraActive = true;
-    document.getElementById('cameraPlaceholder').style.display = 'none';
-    document.getElementById('cameraStatusText').textContent    = 'Connected';
-    document.getElementById('cameraStatus').classList.add('active');
-    document.getElementById('poseBadges').style.display        = sessionMode === 'game' ? 'none' : 'flex';
-    document.getElementById('statusText').textContent          = 'Connected';
-    document.getElementById('statusDot').className             = 'badge-dot online';
+        pollFailCount  = 0;
+        fpsCounter     = 0;
+        fpsWindowStart = Date.now();
 
-    pollFailCount  = 0;
-    fpsCounter     = 0;
-    fpsWindowStart = Date.now();
+        // Tell backend which exercise is active so it draws only relevant joints
+        syncExerciseType();
 
-    // Tell backend which exercise is active so it draws only relevant joints
-    syncExerciseType();
+        // Poll joint-angle/detection data independently of the video stream
+        poseInterval = setInterval(pollPoseData, 300);
 
-    // Poll joint-angle/detection data independently of the video stream
-    poseInterval = setInterval(pollPoseData, 300);
+        camSendFrame();
+    };
 }
 
 // Push current exercise selection + target ROM to backend (drives joint
@@ -200,6 +333,7 @@ async function stopCamera() {
     img.style.display = 'none';
     cameraActive = false;
     poseDetected = false;
+    camCleanup();   // stop sending frames, close the WebSocket, release the browser camera
 
     clearInterval(poseInterval);
     poseInterval = null;
@@ -256,41 +390,60 @@ function handlePoseData(data) {
     document.getElementById('noPoseWarning').style.display  = poseDetected ? 'none' : 'block';
     document.getElementById('detectionStatus').textContent  = poseDetected ? 'Yes' : 'No';
     document.getElementById('detectionStatus').style.color  = poseDetected ? '#1D8A6D' : '#D9503E';
+    if (sessionActive && repsSyncReady && data.reps != null) {
+        repCount = data.reps;
+        const repGoal = parseInt(document.getElementById('targetReps').value);
+        if (sessionMode === 'exercise' && repGoal > 0 && repCount >= repGoal) {
+            updateAnalytics(data.primary_angle, parseInt(document.getElementById('targetRom').value) || 90);
+            showToast('🎯 Target reps completed! Session ending...', 'success');
+            stopSession();
+            return;
+        }
+    }
     if (!poseDetected) return;
 
     const ang = data.angles || {};
     const set  = (id, v) => document.getElementById(id).textContent = v != null ? `${Math.round(v)}°` : '--°';
     const active = getActiveJointGroup();
-    const targetRom = parseInt(document.getElementById('targetRom').value);
+    const targetRom = parseInt(document.getElementById('targetRom').value) || 90;
+
+    // The camera frame is mirrored BEFORE MediaPipe runs, so MediaPipe's l_*/r_*
+    // keys are swapped relative to the patient. The backend already compensates
+    // for that when it DRAWS the skeleton and MEASURES ROM/reps for the selected
+    // side (metrics.set_exercise_state), but the badges below still read the raw
+    // keys - so "Left" showed one arm's angle while the other arm was being drawn
+    // and counted. Read the swapped key so badge, skeleton and rep counter always
+    // refer to the same limb.
+    const A = (joint, uiSide) => ang[(uiSide === 'left' ? 'r_' : 'l_') + joint];
 
     if (active === 'all' || active === 'shoulder') {
         if (selectedSide === 'both' || selectedSide === 'left') {
-            set('leftShoulderAngle', ang.l_shoulder);
-            updateBadge('badge_l_shoulder','L.Shoulder', ang.l_shoulder, targetRom);
+            set('leftShoulderAngle', A('shoulder','left'));
+            updateBadge('badge_l_shoulder','L.Shoulder', A('shoulder','left'), targetRom);
         }
         if (selectedSide === 'both' || selectedSide === 'right') {
-            set('rightShoulderAngle',ang.r_shoulder);
-            updateBadge('badge_r_shoulder','R.Shoulder', ang.r_shoulder, targetRom);
+            set('rightShoulderAngle',A('shoulder','right'));
+            updateBadge('badge_r_shoulder','R.Shoulder', A('shoulder','right'), targetRom);
         }
     }
     if (active === 'all' || active === 'elbow') {
         if (selectedSide === 'both' || selectedSide === 'left') {
-            set('leftElbowAngle',    ang.l_elbow);
-            updateBadge('badge_l_elbow',   'L.Elbow',   ang.l_elbow, targetRom);
+            set('leftElbowAngle',    A('elbow','left'));
+            updateBadge('badge_l_elbow',   'L.Elbow',   A('elbow','left'), targetRom);
         }
         if (selectedSide === 'both' || selectedSide === 'right') {
-            set('rightElbowAngle',   ang.r_elbow);
-            updateBadge('badge_r_elbow',   'R.Elbow',   ang.r_elbow, targetRom);
+            set('rightElbowAngle',   A('elbow','right'));
+            updateBadge('badge_r_elbow',   'R.Elbow',   A('elbow','right'), targetRom);
         }
     }
     if (active === 'all' || active === 'knee') {
         if (selectedSide === 'both' || selectedSide === 'left') {
-            set('leftKneeAngle',     ang.l_knee);
-            updateBadge('badge_l_knee',    'L.Knee',    ang.l_knee,  targetRom);
+            set('leftKneeAngle',     A('knee','left'));
+            updateBadge('badge_l_knee',    'L.Knee',    A('knee','left'),  targetRom);
         }
         if (selectedSide === 'both' || selectedSide === 'right') {
-            set('rightKneeAngle',    ang.r_knee);
-            updateBadge('badge_r_knee',    'R.Knee',    ang.r_knee,  targetRom);
+            set('rightKneeAngle',    A('knee','right'));
+            updateBadge('badge_r_knee',    'R.Knee',    A('knee','right'),  targetRom);
         }
     }
     if (active === 'all' || active === 'finger') {
@@ -309,7 +462,6 @@ function handlePoseData(data) {
     // metric copied from another metric)
     if (sessionActive) {
         try {
-            repCount = data.reps != null ? data.reps : repCount;
             if (data.stability  != null) currentStability  = data.stability;
             if (data.smoothness != null) currentSmoothness = data.smoothness;
             if (data.balance    != null) currentBalance    = data.balance;
@@ -321,13 +473,33 @@ function handlePoseData(data) {
     }
 }
 
+// Joint angle -> how far the joint has MOVED from neutral (mirrors
+// metrics.angle_to_rom on the backend). Shoulder angle grows as the arm rises;
+// elbow/knee/hip/finger angles are ~180deg when straight and shrink as they
+// flex, so movement = 180 - angle. Badge colours must use this, otherwise a
+// resting straight leg (170deg) shows green against a 90deg target.
+function romFromAngle(id, angle) {
+    if (angle == null) return null;
+    if (String(id).toLowerCase().includes('shoulder')) return Math.max(0, angle);
+    return Math.max(0, 180 - angle);
+}
+
+function isBalanceExercise() {
+    return (document.getElementById('exerciseType')?.value || '').toLowerCase().includes('balance');
+}
+
+function isFingerExercise() {
+    const ex = (document.getElementById('exerciseType')?.value || '').toLowerCase();
+    return ex.includes('grip') || ex.includes('finger');
+}
+
 function updateBadge(id, label, angle, targetRom) {
     const el  = document.getElementById(id);
     if (!el) return;
     const val = angle != null ? Math.round(angle) : null;
     el.innerHTML = `<i class="fas fa-circle" style="font-size:7px"></i> ${label}: ${val!=null?val+'°':'--°'}`;
     if (val == null) return;
-    const pct = val / targetRom;
+    const pct = romFromAngle(id, val) / (targetRom > 0 ? targetRom : 90);
     el.className = 'pose-badge ' + (pct >= 0.85 ? 'green' : pct >= 0.6 ? 'orange' : 'red');
 }
 
@@ -342,7 +514,10 @@ function startSession() {
     }
 
     // Read custom duration if selected
-    const customBtn = document.querySelector('.dur-btn[data-sec="0"].active');
+    // Scoped to the EXERCISE duration selector. The unscoped selector also matched
+    // the Game section's "No Limit" button (data-sec="0", active by default), so
+    // every session silently used the Custom box (3 min) instead of 1/2/5 min.
+    const customBtn = document.querySelector('#durationSelector .dur-btn[data-sec="0"].active');
     if (customBtn) {
         countdownTotal = Math.max(1, parseInt(document.getElementById('customDurInput').value||1)) * 60;
     }
@@ -360,8 +535,13 @@ function startSession() {
 
     // Reset server-side rep counter + stability buffer for this new
     // session, and make sure backend has the latest exercise/ROM target
+    repsSyncReady = false;
     syncExerciseType();
-    fetch('/api/session/reset', { method: 'POST' }).catch(e => console.error('session reset failed:', e));
+    fetch('/api/session/reset', { method: 'POST' })
+        .catch(e => console.error('session reset failed:', e))
+        // small delay > poll interval (300ms) so a poll already in flight before
+        // the reset can't deliver an old rep count after we start trusting reps
+        .finally(() => setTimeout(() => { repsSyncReady = true; }, 450));
 
     document.getElementById('startSessionBtn').style.display = 'none';
     document.getElementById('stopSessionBtn').style.display  = 'inline-block';
@@ -423,6 +603,7 @@ function stopSession() {
     if (sessionMode === 'game') { stopGameSession(); return; }
     if (!sessionActive) return;
     sessionActive = false;
+    repsSyncReady = false;
 
     clearInterval(countdownTimer);
     clearInterval(elapsedTimer);
@@ -453,7 +634,8 @@ function updateTimerRing() {
 
 // Analytics update (fully derived from real backend data, no Math.random) 
 function updateAnalytics(primaryAngle, targetRom) {
-    if (primaryAngle != null && targetRom > 0) {
+    if (!(targetRom > 0)) targetRom = 90;   // empty/invalid target ROM used to give NaN% bars
+    if (primaryAngle != null) {
         currentRom = Math.min(targetRom, Math.max(0, primaryAngle));
         const romPct = Math.min(100, (currentRom / targetRom) * 100);
         // Accuracy = form quality, not just "did the joint reach the target
@@ -463,13 +645,17 @@ function updateAnalytics(primaryAngle, targetRom) {
         // than reporting ROM completion alone.
         currentAccuracy = Math.min(100,
             romPct * 0.6 + currentStability * 0.2 + currentSmoothness * 0.2);
+    } else if (isBalanceExercise()) {
+        // Balance has no joint angle / ROM, so it is scored on steadiness only
+        // (accuracy used to sit at 0% for the whole session).
+        currentAccuracy = Math.min(100, (currentStability + currentBalance) / 2);
     }
 
-    const targetReps = parseInt(document.getElementById('targetReps').value);
+    const targetReps = parseInt(document.getElementById('targetReps').value) || 1;
     document.getElementById('accuracyDisplay').textContent   = `${Math.round(currentAccuracy)}%`;
     document.getElementById('accuracyProgress').style.width  = `${currentAccuracy}%`;
     document.getElementById('romDisplay').textContent        = `${Math.round(currentRom)}°`;
-    document.getElementById('romProgress').style.width       = `${(currentRom/targetRom)*100}%`;
+    document.getElementById('romProgress').style.width       = `${Math.min(100, (currentRom/targetRom)*100)}%`;
     document.getElementById('stabilityDisplay').textContent  = `${Math.round(currentStability)}%`;
     document.getElementById('stabilityProgress').style.width = `${currentStability}%`;
     document.getElementById('repCounter').textContent        = `${repCount} / ${targetReps}`;
@@ -479,7 +665,7 @@ function updateAnalytics(primaryAngle, targetRom) {
 }
 
 function updateFeedback(acc, rom) {
-    const t = parseInt(document.getElementById('targetRom').value);
+    const t = parseInt(document.getElementById('targetRom').value) || 90;
     let msg, icon, cls;
     if (acc>85&&rom>t*0.8)      { msg='Excellent form! Keep it up!';            icon='fa-check-circle';       cls='success'; }
     else if (acc>70&&rom>t*0.6) { msg='Good progress. Focus on range of motion.'; icon='fa-thumbs-up';         cls='warning'; }
@@ -602,6 +788,20 @@ async function saveSession() {
     const avgBal    = avg('bal',    currentBalance);
     const avgFat    = avg('fat',    currentFatigue);
 
+    // Recovery score on a true 0-100 scale, same weights as
+    // services/helpers.calculate_recovery_score (acc 30 / ROM 20 / stability 25 /
+    // balance 25). ROM is converted to % of target first (it used to add raw
+    // DEGREES to percentages and could exceed 100). Metrics that don't exist for
+    // an exercise are left out and the weights renormalised: no ROM for Balance,
+    // no balance signal for hand-grip (hands-only frame).
+    const targetRomVal = parseInt(document.getElementById('targetRom').value) || 90;
+    const romPctAvg    = Math.min(100, (avgRom / targetRomVal) * 100);
+    const parts = [[avgAcc, 0.30], [avgStab, 0.25]];
+    if (!isBalanceExercise()) parts.push([romPctAvg, 0.20]);
+    if (!isFingerExercise())  parts.push([avgBal, 0.25]);
+    const wSum = parts.reduce((t, [, w]) => t + w, 0);
+    const recoveryScore = Math.max(0, Math.min(100, parts.reduce((t, [v, w]) => t + v * w, 0) / wSum));
+
     const payload = {
         patient_id:          patientId,
         exercise_type:       exerciseType,
@@ -616,7 +816,7 @@ async function saveSession() {
         balance_score:       +avgBal.toFixed(1),
         movement_smoothness: +avgSmooth.toFixed(1),
         fatigue_estimation:  +avgFat.toFixed(1),
-        recovery_score:      +((avgAcc + avgStab + avgRom + avgBal) / 4).toFixed(1),
+        recovery_score:      +recoveryScore.toFixed(1),
         incorrect_movements: Math.max(0, targetReps - repCount),
         joint_angles:        jointAngles,
         exercise_results:    [],

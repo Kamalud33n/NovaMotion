@@ -5,47 +5,127 @@ which is the only capture path in this build: the server runs on the
 clinic desktop next to the camera.
 """
 from typing import Dict, Any
+from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException
+import cv2
+import numpy as np
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse, JSONResponse
 
-from services import mjpeg_camera, metrics, game_state
+from services import mjpeg_camera, game_state
+from services.auth.deps import get_optional_user, require_clinical
+from services.auth.roles import CLINICAL_ROLES
+from services.user_context import UserContext, get_context
 
 router = APIRouter()
 
 
+def user_ctx(user=Depends(require_clinical)) -> UserContext:
+    """This request's own live-session state (metrics, game engine, pose data).
+    Keyed by the logged-in user, so doctors at different clinics never share
+    counters, exercise settings or game state. require_clinical is cached per
+    request by FastAPI, so the login/DB check still runs only once."""
+    return get_context(user.id)
+
+# WebSocket routes cannot use the HTTP-only `Depends(require_clinical)` that
+# app.py attaches to `router`, so they live on their own router and do the
+# same cookie/role check by hand (see camera_ws below).
+ws_router = APIRouter()
+
+_MAX_WS_FRAME_BYTES = 2 * 1024 * 1024  # a 640x480 JPEG is ~30-80 KB; 2 MB is a generous cap
+
+
+@ws_router.websocket("/ws/camera")
+async def camera_ws(websocket: WebSocket):
+    """Browser-camera pipeline (works when the server has NO camera, i.e.
+    any real deployment). The browser opens the patient's webcam with
+    getUserMedia, sends each frame here as a binary JPEG, and gets the
+    annotated JPEG (skeleton drawn) back. Joint angles / reps / game state
+    are still read by the page from /api/pose_data and /api/game/status.
+
+    Protocol: client sends 1 binary frame, waits for the reply, sends the
+    next (natural back-pressure, so latency never builds up).
+    """
+    # 1) Same login check as the HTTP API (cookie -> approved clinical user).
+    user = get_optional_user(websocket)  # only reads .cookies, works on a WebSocket
+    if user is None or user.role not in CLINICAL_ROLES:
+        await websocket.close(code=4401)
+        return
+
+    # 2) Cookies are sent on cross-site WebSocket handshakes too, so refuse
+    #    pages served from a different origin.
+    origin = websocket.headers.get("origin")
+    if origin and urlparse(origin).netloc != websocket.headers.get("host"):
+        await websocket.close(code=4403)
+        return
+
+    ctx = get_context(user.id)   # this doctor's own state
+    await websocket.accept()
+    ctx.remote_connected()
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+            if len(data) > _MAX_WS_FRAME_BYTES:
+                await websocket.send_text('{"error":"frame too large"}')
+                continue
+            frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                await websocket.send_text('{"error":"bad frame"}')
+                continue
+            try:
+                # MediaPipe is CPU-heavy: keep it off the asyncio event loop.
+                jpg = await run_in_threadpool(mjpeg_camera.process_frame, ctx, frame)
+            except Exception as e:  # never kill the socket over one bad frame
+                print(f"WS camera: processing failed: {e}")
+                await websocket.send_text('{"error":"processing failed"}')
+                continue
+            if jpg is None:
+                await websocket.send_text('{"error":"encode failed"}')
+                continue
+            await websocket.send_bytes(jpg)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"WS camera: closed with error: {e}")
+    finally:
+        ctx.remote_disconnected()
+
+
 @router.get("/video_feed")
-async def video_feed():
-    """Primary live camera feed with pose skeleton drawn server-side. <img src='/video_feed'>"""
+async def video_feed(ctx: UserContext = Depends(user_ctx)):
+    """Server-attached camera feed (local/in-clinic mode only -- the deployed
+    site uses /ws/camera instead). <img src='/video_feed'>"""
     return StreamingResponse(
-        mjpeg_camera.gen_frames(),
+        mjpeg_camera.gen_frames(ctx),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
 
 
 @router.get("/api/pose_data")
-async def api_pose_data():
-    """Latest joint angles + detection flag, updated every frame by gen_frames()."""
-    return JSONResponse(mjpeg_camera.latest_pose_data)
+async def api_pose_data(ctx: UserContext = Depends(user_ctx)):
+    """This user's latest joint angles + detection flag, updated every frame."""
+    return JSONResponse(ctx.pose_data)
 
 
 @router.post("/api/camera/stop")
-async def api_camera_stop():
-    """Explicitly release the camera device (called on Stop / page unload)."""
-    mjpeg_camera.stop_camera()
+async def api_camera_stop(ctx: UserContext = Depends(user_ctx)):
+    """Stop / page unload: clear this user's live flags (and release the
+    server-attached camera, if that mode is in use)."""
+    mjpeg_camera.stop_camera(ctx)
     return JSONResponse({"success": True, "message": "Camera stopped"})
 
 
 @router.post("/api/exercise_type")
-async def set_exercise_type(payload: Dict[str, Any]):
+async def set_exercise_type(payload: Dict[str, Any], ctx: UserContext = Depends(user_ctx)):
     """Frontend calls this whenever the exercise dropdown, target ROM, or
     side (left/right/both) selector changes, so the MJPEG stream draws the
     right joints/side and rep-counts against the right threshold."""
     ex   = payload.get("exercise_type")
     rom  = payload.get("target_rom")
     side = payload.get("side")
-    metrics.set_exercise_state(exercise_type=ex, target_rom=rom, side=side)
-    current_ex, current_rom, current_side = metrics.get_exercise_state()
+    ctx.metrics.set_exercise_state(exercise_type=ex, target_rom=rom, side=side)
+    current_ex, current_rom, current_side = ctx.metrics.get_exercise_state()
     return JSONResponse({
         "success": True,
         "exercise_type": current_ex,
@@ -55,17 +135,17 @@ async def set_exercise_type(payload: Dict[str, Any]):
 
 
 @router.post("/api/session/reset")
-async def api_session_reset():
+async def api_session_reset(ctx: UserContext = Depends(user_ctx)):
     """Call this right before a session starts so rep count + stability
     buffer don't carry over stale data from a previous session/patient."""
-    metrics.reset_state()
+    ctx.metrics.reset_state()
     return JSONResponse({"success": True})
 
 
 @router.get("/api/camera/status")
-async def api_camera_status():
-    """Quick status check - useful for frontend polling / debugging."""
-    return JSONResponse({"active": mjpeg_camera.is_active()})
+async def api_camera_status(ctx: UserContext = Depends(user_ctx)):
+    """Quick status check - is THIS user's camera socket open."""
+    return JSONResponse({"active": ctx.remote_clients > 0})
 
 
 # ── Game mode ────────────────────────────────────────────────────────────
@@ -84,39 +164,39 @@ async def api_list_games():
 
 
 @router.post("/api/game/select")
-async def api_game_select(payload: Dict[str, Any]):
+async def api_game_select(payload: Dict[str, Any], ctx: UserContext = Depends(user_ctx)):
     """Frontend calls this when the therapist picks a game from the
     dropdown. Switches the session page into game mode and creates a fresh
     engine instance for game_id — any target/timer set for a previous game
     is cleared, so /api/game/target must be called again before play."""
     game_id = payload.get("game_id")
-    if not game_state.select_game(game_id):
+    if not ctx.game.select_game(game_id):
         raise HTTPException(404, f"Unknown game: {game_id!r}")
-    game_state.set_mode("game")
+    ctx.game.set_mode("game")
     return JSONResponse({
         "success": True,
-        "active_game": game_state.get_active_game_id(),
+        "active_game": ctx.game.get_active_game_id(),
     })
 
 
 @router.post("/api/session/mode")
-async def api_session_mode(payload: Dict[str, Any]):
+async def api_session_mode(payload: Dict[str, Any], ctx: UserContext = Depends(user_ctx)):
     """Switch the session page between "exercise" and "game" sections
     without changing which game/exercise is selected (e.g. the therapist
     flips back to Exercise mode after a game session)."""
     mode = payload.get("mode")
-    if not game_state.set_mode(mode):
+    if not ctx.game.set_mode(mode):
         raise HTTPException(400, f"Invalid mode: {mode!r} (expected 'exercise' or 'game')")
     return JSONResponse({"success": True, "mode": mode})
 
 
 @router.post("/api/game/target")
-async def api_game_target(payload: Dict[str, Any]):
+async def api_game_target(payload: Dict[str, Any], ctx: UserContext = Depends(user_ctx)):
     """Set this game session's finish condition before calibration starts:
     target_steps and/or duration_seconds (either may be omitted/None —
     whichever condition is set fires first; both unset = manual stop
     only)."""
-    game_state.set_target(
+    ctx.game.set_target(
         target_steps=payload.get("target_steps"),
         duration_seconds=payload.get("duration_seconds"),
     )
@@ -124,34 +204,34 @@ async def api_game_target(payload: Dict[str, Any]):
 
 
 @router.post("/api/game/calibrate")
-async def api_game_calibrate():
+async def api_game_calibrate(ctx: UserContext = Depends(user_ctx)):
     """Reset any stale step/lane/crouch state from a previous session and
     start measuring the neutral standing position now (mirrors
     /api/session/reset + the exercise flow's calibration screen)."""
-    game_state.reset_game()
-    game_state.request_calibration()
+    ctx.game.reset_game()
+    ctx.game.request_calibration()
     return JSONResponse({"success": True})
 
 
 @router.get("/api/game/status")
-async def api_game_status():
+async def api_game_status(ctx: UserContext = Depends(user_ctx)):
     """Live engine status + target/timer/finished state — the session page
     polls this during play to drive the HUD and detect auto-finish."""
-    return JSONResponse(game_state.get_game_status())
+    return JSONResponse(ctx.game.get_game_status())
 
 
 @router.post("/api/game/stop")
-async def api_game_stop():
+async def api_game_stop(ctx: UserContext = Depends(user_ctx)):
     """Therapist/patient ends the game session early (before target/timer
     is reached). Does not release the camera — that's /api/camera/stop,
     called separately by the frontend same as the exercise flow."""
-    game_state.finish_game(reason="manual")
+    ctx.game.finish_game(reason="manual")
     return JSONResponse({"success": True})
 
 
 @router.get("/api/game/summary")
-async def api_game_summary():
+async def api_game_summary(ctx: UserContext = Depends(user_ctx)):
     """Server-tracked totals (steps, events, target/timer info) for the
     session page to fold into its /api/sessions save payload once the game
     session ends."""
-    return JSONResponse(game_state.get_game_summary())
+    return JSONResponse(ctx.game.get_game_summary())

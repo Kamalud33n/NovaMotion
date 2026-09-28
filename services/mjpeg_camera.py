@@ -21,9 +21,11 @@ from typing import Dict, Any, Optional
 import cv2
 import numpy as np
 
-from config import pose, mp_drawing, KEY_LANDMARKS, get_angle, POSE_CONNECTIONS
-from config import hands as _hands, HAND_CONNECTIONS as _HAND_CONNECTIONS
-from services import metrics, game_state
+from config import mp_drawing, KEY_LANDMARKS, get_angle, POSE_CONNECTIONS, set_frame_size, get_angle_2d
+from config import HAND_CONNECTIONS as _HAND_CONNECTIONS
+from services import metrics
+from services import user_context
+from services.user_context import UserContext
 
 # Bright, high-visibility drawing specs (default MediaPipe style is dim on a
 # 1280x720 frame) — used only as a fallback; primary drawing is done manually
@@ -65,11 +67,15 @@ _mjpeg_frame_lock = threading.Lock()
 _mjpeg_reader_thread: Optional[threading.Thread] = None
 _mjpeg_reader_running = False
 
-latest_pose_data: Dict[str, Any] = {
-    "detected": False, "angles": {}, "ts": None,
-    "reps": 0, "stability": 100.0, "primary_angle": None,
-    "smoothness": 100.0, "balance": 100.0, "fatigue": 0.0,
-}
+
+
+def _rep_debug(ctx, exercise, side, target_rom, primary_angle):
+    now = time.time()
+    if now - ctx.dbg_last < 1.0:
+        return
+    ctx.dbg_last = now
+    print(f"REPDBG ex={exercise} side={side} target={target_rom} rom={None if primary_angle is None else round(primary_angle, 1)} "
+          f"{ctx.metrics.get_rep_debug(target_rom)}")
 
 
 def _is_hand_exercise(exercise_type: str) -> bool:
@@ -92,6 +98,51 @@ def _draw_hand_skeleton(frame, hand_landmarks_list):
             landmark_drawing_spec=_MJPEG_LANDMARK_SPEC,
             connection_drawing_spec=_MJPEG_CONNECTION_SPEC,
         )
+
+
+# MediaPipe Hands labels each hand "Left"/"Right" assuming a MIRRORED (selfie)
+# image. gen_frames() flips the frame BEFORE inference, so the label is already
+# the patient's real hand. If Left/Right ever comes out swapped on a particular
+# camera setup, flip this one flag to True - nothing else needs to change.
+_HAND_LABEL_SWAPPED = False
+
+
+def _ui_side(side: str) -> str:
+    """MetricsState.set_exercise_state() stores the side INVERTED (pose mirror fix).
+    Undo that here to get what the doctor actually picked in the UI."""
+    s = (side or "both").lower()
+    if s == "left":
+        return "right"
+    if s == "right":
+        return "left"
+    return "both"
+
+
+def _select_hands(hand_results, side: str):
+    """Return only the hand landmark sets that match the side picked in the UI
+    ("both" keeps every detected hand). Previously every detected hand was
+    drawn and hand #0 was used for angles no matter which side was selected."""
+    lms = list(getattr(hand_results, "multi_hand_landmarks", None) or [])
+    if not lms:
+        return []
+    ui = _ui_side(side)
+    if ui == "both":
+        return lms
+    wanted = ui
+    if _HAND_LABEL_SWAPPED:
+        wanted = "left" if ui == "right" else "right"
+    handed = list(getattr(hand_results, "multi_handedness", None) or [])
+    picked = []
+    for i, lm in enumerate(lms):
+        if i >= len(handed):
+            continue
+        try:
+            label = handed[i].classification[0].label.lower()
+        except Exception:
+            continue
+        if label == wanted:
+            picked.append(lm)
+    return picked
 
 
 def _filter_connections_by_side(conns, side: str):
@@ -325,8 +376,9 @@ def _mjpeg_reader_loop():
             _mjpeg_frame_id += 1
 
 
-def _mjpeg_release_camera():
-    """Release the MJPEG-pipeline camera device and reset state."""
+def _mjpeg_release_camera(ctx: Optional[UserContext] = None):
+    """Release the server-attached camera device (local/in-clinic mode only)
+    and reset that user's live pose flags."""
     global _mjpeg_cap, _mjpeg_active, _mjpeg_reader_running, _mjpeg_latest_frame
     _mjpeg_reader_running = False   # signal reader thread to stop
     with _mjpeg_lock:
@@ -336,11 +388,244 @@ def _mjpeg_release_camera():
             print("MJPEG: camera released")
         _mjpeg_cap = None
     _mjpeg_latest_frame = None
-    latest_pose_data["detected"] = False
-    latest_pose_data["angles"] = {}
+    if ctx is not None:
+        ctx.reset_pose_data()
 
 
-def gen_frames():
+def process_frame(ctx: UserContext, frame) -> Optional[bytes]:
+    """Run the full pose / game pipeline on ONE BGR frame (as delivered by a
+    camera) and return the annotated JPEG bytes, or None if the frame could
+    not be encoded. Shared by the server-camera MJPEG generator (gen_frames)
+    and the browser-camera WebSocket (/ws/camera). `ctx` is the calling user's
+    own state (metrics, game engine, pose data, MediaPipe trackers), so several
+    doctors can stream at once without seeing each other's data. Frames of the
+    SAME user are processed one at a time (their trackers are stateful)."""
+    with ctx.process_lock:
+        ctx.touch()
+        return _process_frame_locked(ctx, frame)
+
+
+def _process_frame_locked(ctx: UserContext, frame) -> Optional[bytes]:
+    m = ctx.metrics
+    g = ctx.game
+    frame = cv2.flip(frame, 1)  # mirror, like the reference app
+    set_frame_size(frame.shape[1], frame.shape[0])
+
+    # ── Game mode: session page is on the "Game" section, not
+    # "Exercise" — skip the exercise-specific rep/ROM/stability path
+    # entirely and hand the frame to the currently selected game's
+    # engine instead (services/game_state.py -> game/registry.py).
+    if g.get_mode() == "game":
+        game_results = None
+        try:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            rgb.flags.writeable = False
+            _pose = ctx.pose
+            if _pose is not None:
+                game_results = _pose.process(rgb)
+            rgb.flags.writeable = True
+        except Exception as e:
+            print(f"MJPEG: MediaPipe processing failed (game mode): {e}")
+            game_results = None
+
+        game_person_found = bool(game_results and game_results.pose_landmarks)
+        now = time.time()
+
+        if game_person_found and mp_drawing is not None:
+            mp_drawing.draw_landmarks(
+                frame, game_results.pose_landmarks, POSE_CONNECTIONS,
+                landmark_drawing_spec=_MJPEG_LANDMARK_SPEC,
+                connection_drawing_spec=_MJPEG_CONNECTION_SPEC,
+            )
+            g.process_frame(
+                game_results.pose_landmarks.landmark,
+                game_results.pose_world_landmarks,
+                now,
+                frame.shape,
+            )
+        else:
+            g.process_frame(None, None, now, frame.shape)
+
+        ctx.pose_data["detected"] = game_person_found
+        ctx.pose_data["ts"] = datetime.datetime.now().isoformat()
+
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        if not ok:
+            print("MJPEG: JPEG encode failed, skipping this frame")
+            return None
+        return buf.tobytes()
+
+    active_exercise, target_rom, side = m.get_exercise_state()
+    hand_mode = _is_hand_exercise(active_exercise)
+
+    angles: Dict[str, float] = {}
+    primary_angle: Optional[float] = None
+    reps = m.get_rep_count()
+    stability  = m.get_stability()
+    smoothness = m.get_smoothness()
+    balance    = m.get_balance()
+    fatigue    = m.get_current_fatigue()
+
+    if hand_mode:
+        # ── Hand Grip / Finger Flexion path: MediaPipe Hands ──────
+        hand_results = None
+        try:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            rgb.flags.writeable = False
+            _hands = ctx.hands
+            if _hands is not None:
+                hand_results = _hands.process(rgb)
+            rgb.flags.writeable = True
+        except Exception as e:
+            print(f"MJPEG: MediaPipe Hands processing failed: {e}")
+            hand_results = None
+
+        # Only the hand(s) matching the Left/Right/Both selector are
+        # drawn and measured - the other hand is ignored completely.
+        selected_hands = _select_hands(hand_results, side) if hand_results else []
+        hand_found = bool(selected_hands)
+        detected = hand_found
+
+        if hand_found:
+            _draw_hand_skeleton(frame, selected_hands)
+            # Single-hand exercise: first selected hand drives angles/reps.
+            lm0 = selected_hands[0].landmark
+            angles = metrics.compute_finger_curl_angles(lm0)
+            # Stability for a hands-only frame = wrist steadiness (there
+            # are no hips/shoulders in this frame, it used to stay at 100).
+            stability = m.update_stability_point(lm0[0].x, lm0[0].y)
+
+            primary_angle = metrics.compute_primary_angle(angles, active_exercise, side)
+            reps       = m.update_rep_count(primary_angle, target_rom)
+            _rep_debug(ctx, active_exercise, side, target_rom, primary_angle)
+            # Balance is body-pose-derived (shoulder sway) and does not
+            # apply to a hands-only frame, so it stays at its neutral
+            # value; smoothness comes from finger-angle jerk.
+            smoothness = m.update_smoothness(primary_angle)
+            fatigue    = m.maybe_record_rep_quality(reps, primary_angle, target_rom)
+
+        ctx.pose_data["detected"]      = detected
+        ctx.pose_data["angles"]        = angles
+        ctx.pose_data["ts"]            = datetime.datetime.now().isoformat()
+        ctx.pose_data["reps"]          = reps
+        ctx.pose_data["stability"]     = stability
+        ctx.pose_data["smoothness"]    = smoothness
+        ctx.pose_data["balance"]       = balance
+        ctx.pose_data["fatigue"]       = fatigue
+        ctx.pose_data["primary_angle"] = primary_angle
+
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        if not ok:
+            print("MJPEG: JPEG encode failed, skipping this frame")
+            return None
+        return buf.tobytes()
+
+    # ── Regular body-pose path (all other exercise types) ─────────
+    results = None
+    try:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rgb.flags.writeable = False
+        _pose = ctx.pose
+        if _pose is not None:
+            results = _pose.process(rgb)
+        rgb.flags.writeable = True
+    except Exception as e:
+        print(f"MJPEG: MediaPipe processing failed: {e}")
+        results = None
+
+    person_found = bool(results and results.pose_landmarks)
+
+    # ── TEMP DEBUG (remove once confirmed fixed) ───────────────────
+    # Prints whether MediaPipe found ANY person at all, vs. the
+    # exercise-specific joint-visibility gate below. If person_found
+    # is always False, it's a MediaPipe/lighting/framing issue.
+    # If person_found is True but detected ends up False, it's the
+    # _relevant_landmarks_visible() joint-visibility gate — meaning
+    # the joints THIS exercise needs aren't in frame / visible enough.
+    if not person_found:
+        print("MJPEG DEBUG: MediaPipe found NO person in frame")
+    # ────────────────────────────────────────────────────────────
+
+    # "detected" now means "the joints THIS exercise needs are
+    # visible" rather than "MediaPipe found some person somewhere
+    # in frame" — so an Elbow exercise no longer needs the
+    # patient's legs in shot to register as connected.
+    detected = person_found and _relevant_landmarks_visible(
+        results.pose_landmarks.landmark, active_exercise, side
+    )
+
+    # ── TEMP DEBUG (remove once confirmed fixed) ───────────────────
+    if person_found:
+        print(f"MJPEG DEBUG: person_found=True, exercise={active_exercise}, detected={detected}")
+    # ────────────────────────────────────────────────────────────
+
+    if person_found and mp_drawing is not None:
+        # Skeleton is still drawn whenever MediaPipe found a person
+        # at all, even if the exercise-relevant joints aren't all
+        # visible yet — the doctor can see the patient adjusting
+        # into frame instead of a blank video.
+        _draw_filtered_skeleton(frame, results.pose_landmarks.landmark, active_exercise, side)
+
+        lm = results.pose_landmarks.landmark
+        try:
+            if len(lm) > 16:
+                angles["l_elbow"] = round(get_angle_2d(lm[11], lm[13], lm[15]), 1)
+                angles["r_elbow"] = round(get_angle_2d(lm[12], lm[14], lm[16]), 1)
+            if len(lm) > 28:
+                angles["l_knee"] = round(get_angle_2d(lm[23], lm[25], lm[27]), 1)
+                angles["r_knee"] = round(get_angle_2d(lm[24], lm[26], lm[28]), 1)
+            if len(lm) > 26:
+                angles["l_hip"] = round(get_angle_2d(lm[11], lm[23], lm[25]), 1)
+                angles["r_hip"] = round(get_angle_2d(lm[12], lm[24], lm[26]), 1)
+            if len(lm) > 14:
+                # Shoulder flexion/abduction: hip → shoulder → elbow,
+                # measures how far the arm is raised relative to the torso.
+                angles["l_shoulder"] = round(get_angle_2d(lm[23], lm[11], lm[13]), 1)
+                angles["r_shoulder"] = round(get_angle_2d(lm[24], lm[12], lm[14]), 1)
+            if len(lm) > 32:
+                # knee - ankle - foot_index (landmarks 31/32 are the only
+                # foot points MediaPipe Pose provides)
+                angles["l_ankle"] = round(get_angle_2d(lm[25], lm[27], lm[31]), 1)
+                angles["r_ankle"] = round(get_angle_2d(lm[26], lm[28], lm[32]), 1)
+        except Exception as e:
+            print(f"MJPEG: angle calculation failed: {e}")
+
+        # Real rep counting + stability + smoothness + balance
+        # (no randomness, no duplicated/copied metrics)
+        primary_angle = metrics.compute_primary_angle(angles, active_exercise, side)
+        reps       = m.update_rep_count(primary_angle, target_rom)
+        _rep_debug(ctx, active_exercise, side, target_rom, primary_angle)
+        stability  = m.update_stability(lm)
+        smoothness = m.update_smoothness(primary_angle)
+        balance    = m.update_balance(lm)
+
+        # Real fatigue — record rep quality the instant a new rep
+        # is detected, then fatigue score reflects the actual
+        # early-vs-recent quality trend for this session
+        fatigue = m.maybe_record_rep_quality(reps, primary_angle, target_rom)
+
+    ctx.pose_data["detected"]      = detected
+    ctx.pose_data["angles"]        = angles
+    ctx.pose_data["ts"]            = datetime.datetime.now().isoformat()
+    ctx.pose_data["reps"]          = reps
+    ctx.pose_data["stability"]     = stability
+    ctx.pose_data["smoothness"]    = smoothness
+    ctx.pose_data["balance"]       = balance
+    ctx.pose_data["fatigue"]       = fatigue
+    ctx.pose_data["primary_angle"] = primary_angle
+
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+    if not ok:
+        print("MJPEG: JPEG encode failed, skipping this frame")
+        return None
+
+    return buf.tobytes()
+
+
+
+def gen_frames(ctx: UserContext):
+    """Server-attached camera mode (local/in-clinic): frames come from a camera
+    plugged into THIS machine. Not used by the deployed browser-camera flow."""
     global _mjpeg_active
 
     if not _mjpeg_open_camera():
@@ -385,210 +670,10 @@ def gen_frames():
             last_frame_id = frame_id
             frame = frame.copy()  # reader thread may overwrite the shared slot while we work on this one
 
-            frame = cv2.flip(frame, 1)  # mirror, like the reference app
-
-            # ── Game mode: session page is on the "Game" section, not
-            # "Exercise" — skip the exercise-specific rep/ROM/stability path
-            # entirely and hand the frame to the currently selected game's
-            # engine instead (services/game_state.py -> game/registry.py).
-            if game_state.get_mode() == "game":
-                game_results = None
-                try:
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    rgb.flags.writeable = False
-                    if pose is not None:
-                        game_results = pose.process(rgb)
-                    rgb.flags.writeable = True
-                except Exception as e:
-                    print(f"MJPEG: MediaPipe processing failed (game mode): {e}")
-                    game_results = None
-
-                game_person_found = bool(game_results and game_results.pose_landmarks)
-                now = time.time()
-
-                if game_person_found and mp_drawing is not None:
-                    mp_drawing.draw_landmarks(
-                        frame, game_results.pose_landmarks, POSE_CONNECTIONS,
-                        landmark_drawing_spec=_MJPEG_LANDMARK_SPEC,
-                        connection_drawing_spec=_MJPEG_CONNECTION_SPEC,
-                    )
-                    game_state.process_frame(
-                        game_results.pose_landmarks.landmark,
-                        game_results.pose_world_landmarks,
-                        now,
-                        frame.shape,
-                    )
-                else:
-                    game_state.process_frame(None, None, now, frame.shape)
-
-                latest_pose_data["detected"] = game_person_found
-                latest_pose_data["ts"] = datetime.datetime.now().isoformat()
-
-                ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                if not ok:
-                    print("MJPEG: JPEG encode failed, skipping this frame")
-                    continue
-                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
+            jpg = process_frame(ctx, frame)
+            if jpg is None:
                 continue
-
-            active_exercise, target_rom, side = metrics.get_exercise_state()
-            hand_mode = _is_hand_exercise(active_exercise)
-
-            angles: Dict[str, float] = {}
-            primary_angle: Optional[float] = None
-            reps = 0
-            stability  = metrics.get_stability()
-            smoothness = metrics.get_smoothness()
-            balance    = metrics.get_balance()
-            fatigue    = metrics.get_current_fatigue()
-
-            if hand_mode:
-                # ── Hand Grip / Finger Flexion path: MediaPipe Hands ──────
-                hand_results = None
-                try:
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    rgb.flags.writeable = False
-                    if _hands is not None:
-                        hand_results = _hands.process(rgb)
-                    rgb.flags.writeable = True
-                except Exception as e:
-                    print(f"MJPEG: MediaPipe Hands processing failed: {e}")
-                    hand_results = None
-
-                hand_found = bool(hand_results and hand_results.multi_hand_landmarks)
-                detected = hand_found
-
-                if hand_found:
-                    _draw_hand_skeleton(frame, hand_results.multi_hand_landmarks)
-                    # Use the first detected hand for angles/reps (single-hand
-                    # exercise — a second hand in frame is just ignored).
-                    lm0 = hand_results.multi_hand_landmarks[0].landmark
-                    angles = metrics.compute_finger_curl_angles(lm0)
-
-                    primary_angle = metrics.compute_primary_angle(angles, active_exercise, side)
-                    reps       = metrics.update_rep_count(primary_angle, target_rom)
-                    # Stability/smoothness/balance are body-pose-derived (hip
-                    # jitter, shoulder sway) and don't apply to a hands-only
-                    # frame, so they stay at whatever they last were —
-                    # smoothness alone still makes sense off finger-angle jerk.
-                    smoothness = metrics.update_smoothness(primary_angle)
-                    fatigue    = metrics.maybe_record_rep_quality(reps, primary_angle, target_rom)
-
-                latest_pose_data["detected"]      = detected
-                latest_pose_data["angles"]        = angles
-                latest_pose_data["ts"]            = datetime.datetime.now().isoformat()
-                latest_pose_data["reps"]          = reps
-                latest_pose_data["stability"]     = stability
-                latest_pose_data["smoothness"]    = smoothness
-                latest_pose_data["balance"]       = balance
-                latest_pose_data["fatigue"]       = fatigue
-                latest_pose_data["primary_angle"] = primary_angle
-
-                ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                if not ok:
-                    print("MJPEG: JPEG encode failed, skipping this frame")
-                    continue
-                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
-                continue
-
-            # ── Regular body-pose path (all other exercise types) ─────────
-            results = None
-            try:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                rgb.flags.writeable = False
-                if pose is not None:
-                    results = pose.process(rgb)
-                rgb.flags.writeable = True
-            except Exception as e:
-                print(f"MJPEG: MediaPipe processing failed: {e}")
-                results = None
-
-            person_found = bool(results and results.pose_landmarks)
-
-            # ── TEMP DEBUG (remove once confirmed fixed) ───────────────────
-            # Prints whether MediaPipe found ANY person at all, vs. the
-            # exercise-specific joint-visibility gate below. If person_found
-            # is always False, it's a MediaPipe/lighting/framing issue.
-            # If person_found is True but detected ends up False, it's the
-            # _relevant_landmarks_visible() joint-visibility gate — meaning
-            # the joints THIS exercise needs aren't in frame / visible enough.
-            if not person_found:
-                print("MJPEG DEBUG: MediaPipe found NO person in frame")
-            # ────────────────────────────────────────────────────────────
-
-            # "detected" now means "the joints THIS exercise needs are
-            # visible" rather than "MediaPipe found some person somewhere
-            # in frame" — so an Elbow exercise no longer needs the
-            # patient's legs in shot to register as connected.
-            detected = person_found and _relevant_landmarks_visible(
-                results.pose_landmarks.landmark, active_exercise, side
-            )
-
-            # ── TEMP DEBUG (remove once confirmed fixed) ───────────────────
-            if person_found:
-                print(f"MJPEG DEBUG: person_found=True, exercise={active_exercise}, detected={detected}")
-            # ────────────────────────────────────────────────────────────
-
-            if person_found and mp_drawing is not None:
-                # Skeleton is still drawn whenever MediaPipe found a person
-                # at all, even if the exercise-relevant joints aren't all
-                # visible yet — the doctor can see the patient adjusting
-                # into frame instead of a blank video.
-                _draw_filtered_skeleton(frame, results.pose_landmarks.landmark, active_exercise, side)
-
-                lm = results.pose_landmarks.landmark
-                try:
-                    if len(lm) > 16:
-                        angles["l_elbow"] = round(get_angle(lm[11], lm[13], lm[15]), 1)
-                        angles["r_elbow"] = round(get_angle(lm[12], lm[14], lm[16]), 1)
-                    if len(lm) > 28:
-                        angles["l_knee"] = round(get_angle(lm[23], lm[25], lm[27]), 1)
-                        angles["r_knee"] = round(get_angle(lm[24], lm[26], lm[28]), 1)
-                    if len(lm) > 26:
-                        angles["l_hip"] = round(get_angle(lm[11], lm[23], lm[25]), 1)
-                        angles["r_hip"] = round(get_angle(lm[12], lm[24], lm[26]), 1)
-                    if len(lm) > 14:
-                        # Shoulder flexion/abduction: hip → shoulder → elbow,
-                        # measures how far the arm is raised relative to the torso.
-                        angles["l_shoulder"] = round(get_angle(lm[23], lm[11], lm[13]), 1)
-                        angles["r_shoulder"] = round(get_angle(lm[24], lm[12], lm[14]), 1)
-                    if len(lm) > 32:
-                        # knee - ankle - foot_index (landmarks 31/32 are the only
-                        # foot points MediaPipe Pose provides)
-                        angles["l_ankle"] = round(get_angle(lm[25], lm[27], lm[31]), 1)
-                        angles["r_ankle"] = round(get_angle(lm[26], lm[28], lm[32]), 1)
-                except Exception as e:
-                    print(f"MJPEG: angle calculation failed: {e}")
-
-                # Real rep counting + stability + smoothness + balance
-                # (no randomness, no duplicated/copied metrics)
-                primary_angle = metrics.compute_primary_angle(angles, active_exercise, side)
-                reps       = metrics.update_rep_count(primary_angle, target_rom)
-                stability  = metrics.update_stability(lm)
-                smoothness = metrics.update_smoothness(primary_angle)
-                balance    = metrics.update_balance(lm)
-
-                # Real fatigue — record rep quality the instant a new rep
-                # is detected, then fatigue score reflects the actual
-                # early-vs-recent quality trend for this session
-                fatigue = metrics.maybe_record_rep_quality(reps, primary_angle, target_rom)
-
-            latest_pose_data["detected"]      = detected
-            latest_pose_data["angles"]        = angles
-            latest_pose_data["ts"]            = datetime.datetime.now().isoformat()
-            latest_pose_data["reps"]          = reps
-            latest_pose_data["stability"]     = stability
-            latest_pose_data["smoothness"]    = smoothness
-            latest_pose_data["balance"]       = balance
-            latest_pose_data["fatigue"]       = fatigue
-            latest_pose_data["primary_angle"] = primary_angle
-
-            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            if not ok:
-                print("MJPEG: JPEG encode failed, skipping this frame")
-                continue
-
-            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
+            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpg + b'\r\n')
 
     except GeneratorExit:
         # Client closed the <img> / navigated away
@@ -596,16 +681,20 @@ def gen_frames():
     except Exception as e:
         print(f"MJPEG: generator crashed unexpectedly: {e}")
     finally:
-        _mjpeg_release_camera()
+        _mjpeg_release_camera(ctx)
         print("MJPEG: stream ended, camera released")
 
 
 def is_active() -> bool:
-    """Quick status check — used by /api/camera/status and /api/health."""
+    """True if a server-attached camera is streaming OR any user has a
+    browser-camera socket open -- used by /api/health."""
+    if user_context.any_camera_active():
+        return True
     with _mjpeg_lock:
         return _mjpeg_active and _mjpeg_cap is not None and _mjpeg_cap.isOpened()
 
 
-def stop_camera():
-    """Explicitly release the MJPEG camera device (called on Stop / page unload)."""
-    _mjpeg_release_camera()
+def stop_camera(ctx: Optional[UserContext] = None):
+    """Release the server-attached camera device (no-op in browser-camera mode)
+    and clear this user's live pose flags. Called on Stop / page unload."""
+    _mjpeg_release_camera(ctx)

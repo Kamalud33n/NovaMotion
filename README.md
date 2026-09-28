@@ -12,9 +12,11 @@ and a role-based portal for doctors, therapists and admins.
 ## 1. About
 
 - **App name (code):** Rehabilitation AI System (In-Clinic) — `app.py`, version `2.3.0`
-- **Runs on:** one clinic desktop, with a webcam physically attached to that
-  machine. There is one MJPEG camera pipeline (`services/mjpeg_camera.py`),
-  not a multi-camera / multi-tenant setup.
+- **Runs on:** any server (local machine, VPS, Docker). The patient's camera is
+  opened by the **doctor's browser** (`getUserMedia`), so the server needs no
+  camera. Frames go to the server over a WebSocket (`/ws/camera`), MediaPipe runs
+  server-side and the annotated frame comes back. Several doctors / clinics can
+  use it at the same time, each with their own isolated session state.
 - **Core idea:** a doctor/therapist starts a session with a patient in front
   of the webcam, MediaPipe tracks joint angles in real time, the app scores
   accuracy / ROM / stability / balance / smoothness / fatigue, and a
@@ -63,7 +65,7 @@ thero/
 │   ├── pages.py                # public/clinical HTML pages: /, /dashboard, /patients,
 │   │                            #   /session, /reports, /analytics, /settings
 │   ├── patients.py / sessions.py / reports.py / analytics.py / dashboard.py
-│   ├── camera.py               # /video_feed MJPEG stream + camera controls
+│   ├── camera.py               # /ws/camera (browser camera) + /video_feed (server camera) + controls
 │   ├── tickets.py              # clinical side: raise/view own tickets
 │   ├── export.py               # MedNova integration: signed export API (EXPORT_API_KEY)
 │   ├── auth/                   # login, forgot/reset password, profile
@@ -91,8 +93,11 @@ thero/
 │   │   ├── mailer.py               # SMTP sending used by both forgot-password and OTP registration
 │   │   └── web.py                  # render() helper for Jinja2 pages
 │   ├── ownership.py              # per-user patient/session scoping
-│   ├── helpers.py, metrics.py, report_builder.py, game_state.py
-│   ├── mjpeg_camera.py           # webcam capture + MJPEG streaming, single camera only
+│   ├── helpers.py, report_builder.py
+│   ├── user_context.py           # per-user live state (metrics, game, pose data, MediaPipe) + idle cleanup
+│   ├── metrics.py                # MetricsState class: reps/stability/smoothness/balance/fatigue per user
+│   ├── game_state.py             # GameState class: game engine/calibration/timer per user
+│   ├── mjpeg_camera.py           # process_frame(ctx, frame) pose/game pipeline + optional server-camera stream
 │   └── export_auth.py            # require_export_key dependency for routers/export.py
 │
 ├── game/
@@ -120,8 +125,22 @@ thero/
 - **`data/rehab.db`** is a leftover/dev SQLite file — the app itself talks to
   MySQL only (`database.py`). `chaneg.py` exists specifically to migrate an
   old SQLite file like this into MySQL.
-- **Camera is single-instance, in-clinic only** — there's no multi-camera or
-  cloud-camera support; `mjpeg_camera.py` opens local device index via OpenCV.
+- **Camera runs in the browser.** `static/session.js` opens the camera with
+  `getUserMedia` (external USB webcam preferred, built-in laptop camera as
+  fallback), sends JPEG frames to `/ws/camera` and shows the annotated frame
+  that comes back. `/video_feed` (server-attached camera via OpenCV) still
+  exists for a purely local, in-clinic setup but is no longer used by the page.
+- **Multi-user.** Live state is per logged-in user (`services/user_context.py`),
+  so doctors at different clinics never share reps, exercise settings or game
+  state. State is in process memory: run **one** uvicorn process (no
+  `--workers N`). Idle sessions are freed after 30 minutes.
+- **HTTPS is required in production** for browser camera access (`localhost`
+  is the only exception). If you put a reverse proxy (nginx etc.) in front,
+  it must forward WebSocket upgrades for `/ws/camera`
+  (`proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";`).
+- **Pin `mediapipe`** in `requirements.txt` — newer releases dropped `mp.solutions`.
+- **Secrets & patient data are not in git.** Copy `.env.example` to `.env`;
+  `data/`, `reports/` and `uploads/` are git-ignored (kept as empty folders).
 
 ## 4. Roles, approval & tickets — the flow
 

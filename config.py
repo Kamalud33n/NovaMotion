@@ -8,6 +8,7 @@ Shared configuration / singletons used across the app:
 """
 import os
 import sys
+import threading
 import types
 import json as _json
 import warnings
@@ -55,47 +56,73 @@ for d in ("data", "reports", "uploads", "static", "templates", "assets"):
 templates = Jinja2Templates(directory="templates")
 templates.env.filters["tojson"] = lambda obj: _json.dumps(obj)
 
-# MediaPipe init (optimized) 
-# NOTE (fix — pose not detecting): min_detection_confidence / min_tracking_confidence
-# lowered from 0.5 -> 0.3 so low-light / overexposed webcam frames still register
-# a person. model_complexity bumped 0 -> 1 for better accuracy in poor lighting;
-# smooth_landmarks turned back on to reduce jitter from the lower thresholds.
-# If FPS drops too much on this machine, set model_complexity back to 0 and just
-# keep the lower confidence values.
+# MediaPipe init (optimized)
+# NOTE: Pose / Hands are NOT shared singletons any more. MediaPipe's tracker
+# keeps per-video state between frames, so two doctors streaming at the same
+# time on one shared Pose object would corrupt each other's tracking. Each
+# logged-in user gets their own instances from create_pose() / create_hands()
+# (see services/user_context.py); this module only exposes the factories plus
+# the stateless drawing helpers / connection tables.
+#
+# min_detection_confidence / min_tracking_confidence 0.3 (was 0.5) so
+# low-light / overexposed webcam frames still register a person;
+# model_complexity 1 (was 0) for better accuracy, smooth_landmarks on to reduce
+# jitter. If the server CPU is struggling with many users, set
+# model_complexity back to 0 in create_pose().
 try:
     _mp_pose = mp.solutions.pose
-    pose = _mp_pose.Pose(
-        static_image_mode=False,
-        model_complexity=1,           # ← was 0; 1 = more accurate, still real-time
-        smooth_landmarks=True,        # ← was False; reduces jitter
-        min_detection_confidence=0.3, # ← was 0.5; easier to detect in poor lighting
-        min_tracking_confidence=0.3,  # ← was 0.5
-    )
     mp_drawing        = mp.solutions.drawing_utils
     mp_drawing_styles = mp.solutions.drawing_styles
     POSE_CONNECTIONS  = _mp_pose.POSE_CONNECTIONS
-    print("MediaPipe Pose initialized (complexity=1, conf=0.3)")
+    MEDIAPIPE_READY   = True
+    print("MediaPipe Pose available (per-user instances, complexity=1, conf=0.3)")
 except Exception as exc:
     print(f"MediaPipe init failed: {exc}")
-    pose = mp_drawing = mp_drawing_styles = POSE_CONNECTIONS = None
+    _mp_pose = mp_drawing = mp_drawing_styles = POSE_CONNECTIONS = None
+    MEDIAPIPE_READY = False
 
-# MediaPipe Hands init — separate model, needed for finger/grip tracking.
-# Pose's 33 landmarks stop at the wrist, so a real finger-curl / hand-grip
-# exercise needs this second model running alongside Pose.
 try:
     _mp_hands = mp.solutions.hands
-    hands = _mp_hands.Hands(
-        static_image_mode=False,
-        max_num_hands=2,
-        model_complexity=0,           # ← 0 = fastest, matches Pose setting
-        min_detection_confidence=0.3, # ← was 0.5; matches Pose threshold change above
-        min_tracking_confidence=0.3,  # ← was 0.5
-    )
     HAND_CONNECTIONS = _mp_hands.HAND_CONNECTIONS
-    print("MediaPipe Hands initialized (optimized: complexity=0, conf=0.3)")
+    print("MediaPipe Hands available (per-user instances, complexity=0, conf=0.3)")
 except Exception as exc:
     print(f"MediaPipe Hands init failed: {exc}")
-    hands = HAND_CONNECTIONS = None
+    _mp_hands = HAND_CONNECTIONS = None
+
+
+def create_pose():
+    """A NEW MediaPipe Pose tracker (one per user), or None if MediaPipe isn't usable."""
+    if _mp_pose is None:
+        return None
+    try:
+        return _mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=1,
+            smooth_landmarks=True,
+            min_detection_confidence=0.3,
+            min_tracking_confidence=0.3,
+        )
+    except Exception as exc:
+        print(f"MediaPipe Pose create failed: {exc}")
+        return None
+
+
+def create_hands():
+    """A NEW MediaPipe Hands tracker (one per user), or None if MediaPipe isn't usable."""
+    if _mp_hands is None:
+        return None
+    try:
+        return _mp_hands.Hands(
+            static_image_mode=False,
+            max_num_hands=2,
+            model_complexity=0,
+            min_detection_confidence=0.3,
+            min_tracking_confidence=0.3,
+        )
+    except Exception as exc:
+        print(f"MediaPipe Hands create failed: {exc}")
+        return None
+
 
 # Hand landmark indices (21 points per hand) — MCP/PIP/DIP/TIP per finger,
 # used for finger-curl angle calculation.
@@ -120,9 +147,37 @@ KEY_LANDMARKS = {
 }
 
 
+# Frame size used to un-normalise landmark coords in get_angle*(). It is
+# thread-local because each frame is processed start-to-finish on ONE worker
+# thread, while different users' frames (possibly different resolutions) run
+# on different threads at the same time -- a plain global would let them
+# overwrite each other's size mid-frame.
+_frame_size = threading.local()
+
+
+def set_frame_size(w: int, h: int):
+    if w and h:
+        _frame_size.w, _frame_size.h = float(w), float(h)
+
+
+def _wh():
+    return getattr(_frame_size, "w", 1.0), getattr(_frame_size, "h", 1.0)
+
+
 def get_angle(p1, p2, p3) -> float:
-    a = np.array([p1.x - p2.x, p1.y - p2.y, p1.z - p2.z])
-    b = np.array([p3.x - p2.x, p3.y - p2.y, p3.z - p2.z])
+    w, h = _wh()
+    a = np.array([(p1.x - p2.x) * w, (p1.y - p2.y) * h, (p1.z - p2.z) * w])
+    b = np.array([(p3.x - p2.x) * w, (p3.y - p2.y) * h, (p3.z - p2.z) * w])
+    na, nb = np.linalg.norm(a), np.linalg.norm(b)
+    if na == 0 or nb == 0:
+        return 0.0
+    return float(np.degrees(np.arccos(np.clip(np.dot(a, b) / (na * nb), -1.0, 1.0))))
+
+
+def get_angle_2d(p1, p2, p3) -> float:
+    w, h = _wh()
+    a = np.array([(p1.x - p2.x) * w, (p1.y - p2.y) * h])
+    b = np.array([(p3.x - p2.x) * w, (p3.y - p2.y) * h])
     na, nb = np.linalg.norm(a), np.linalg.norm(b)
     if na == 0 or nb == 0:
         return 0.0

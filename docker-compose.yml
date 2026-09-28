@@ -13,18 +13,10 @@ services:
       DB_HOST: db
     ports:
       - "8000:8000"
-    # Camera devices aren't auto-detected by Docker — they must be exposed
-    # explicitly. Mounting the whole /dev tree (instead of hardcoding
-    # /dev/video0) means the app's own _detect_camera_index() can probe
-    # whichever index the webcam actually enumerates at, since USB webcams
-    # often aren't at index 0 and the index can shift when replugged.
-    # `privileged: true` is the simplest reliable way to make that mount
-    # work with a real character device — fine on a locked-down clinic PC
-    # that only runs this app, but ask your infra/security team if that's
-    # not the case for your deployment.
-    privileged: true
+    # No camera passthrough needed: the patient's camera is opened by the
+    # BROWSER (getUserMedia) and streamed to /ws/camera. If you ever go back to a
+    # server-attached USB camera, re-add `privileged: true` and `- /dev:/dev`.
     volumes:
-      - /dev:/dev
       - ./uploads:/app/uploads
       - ./reports:/app/reports
       - ./data:/app/data

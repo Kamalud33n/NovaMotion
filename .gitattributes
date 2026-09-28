@@ -1,0 +1,6 @@
+# Normalise line endings (the project mixed CRLF and LF)
+* text=auto
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
