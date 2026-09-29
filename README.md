@@ -1,4 +1,4 @@
-# Thero — In-Clinic Rehabilitation AI System
+# NovaMotion — In-Clinic Rehabilitation AI System
 
 FastAPI-based in-clinic platform for physiotherapy rehab tracking: webcam +
 MediaPipe pose sessions, patient records, recovery analytics, PDF reports,
