@@ -5,7 +5,7 @@ sqlalchemy
 opencv-python
 # PIN THIS to the version you developed with (`pip show mediapipe`).
 # Newer mediapipe releases removed `mp.solutions`, which this app uses for Pose/Hands.
-mediapipe
+mediapipe==0.10.21
 numpy
 pandas
 reportlab
