@@ -124,6 +124,13 @@ async def set_exercise_type(payload: Dict[str, Any], ctx: UserContext = Depends(
     ex   = payload.get("exercise_type")
     rom  = payload.get("target_rom")
     side = payload.get("side")
+    # The server remembers each user's Exercise/Game mode between page loads
+    # (context lives 30 min), but the page always starts in "Exercise". The page
+    # sends its own mode with every exercise sync so a stale "game" mode on the
+    # server can never make the camera draw/track the full body for an exercise.
+    mode = payload.get("mode")
+    if mode in ("exercise", "game"):
+        ctx.game.set_mode(mode)
     ctx.metrics.set_exercise_state(exercise_type=ex, target_rom=rom, side=side)
     current_ex, current_rom, current_side = ctx.metrics.get_exercise_state()
     return JSONResponse({
@@ -134,11 +141,31 @@ async def set_exercise_type(payload: Dict[str, Any], ctx: UserContext = Depends(
     })
 
 
+def _reset_session_state(ctx: UserContext):
+    """Runs under ctx.process_lock so it can never interleave with a frame that
+    is still being processed. Without this, a slow frame (production: MediaPipe
+    on a busier/slower server + network latency) that started BEFORE the reset
+    would finish AFTER it and write the previous session's rep count back into
+    pose_data, and the page would see "target reps reached" and end the new
+    session the moment it started."""
+    with ctx.process_lock:
+        ctx.metrics.reset_state()
+        # /api/pose_data serves ctx.pose_data, which is only rewritten when the
+        # next frame is processed. Clear the per-session numbers here too,
+        # otherwise the old rep count is served until that frame arrives.
+        ctx.pose_data["reps"]          = 0
+        ctx.pose_data["stability"]     = 100.0
+        ctx.pose_data["smoothness"]    = 100.0
+        ctx.pose_data["balance"]       = 100.0
+        ctx.pose_data["fatigue"]       = 0.0
+        ctx.pose_data["primary_angle"] = None
+
+
 @router.post("/api/session/reset")
 async def api_session_reset(ctx: UserContext = Depends(user_ctx)):
     """Call this right before a session starts so rep count + stability
     buffer don't carry over stale data from a previous session/patient."""
-    ctx.metrics.reset_state()
+    await run_in_threadpool(_reset_session_state, ctx)   # lock may wait for an in-flight frame
     return JSONResponse({"success": True})
 
 

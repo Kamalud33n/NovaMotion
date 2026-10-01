@@ -16,6 +16,8 @@ let currentBalance    = 100;   //  real — from backend shoulder-sway variance
 let currentFatigue    = 0;     //  real — from backend rep-quality decline trend
 let repCount         = 0;
 let repsSyncReady    = false;   // true once /api/session/reset has landed, so stale reps from the previous session can't auto-stop this one
+let resetDoneAt      = 0;       // Date.now() when /api/session/reset last completed; polls SENT before this carry old-session data
+let lastPollApplied  = 0;       // send-time of the newest /api/pose_data response applied (drops out-of-order responses)
 
 let poseDetected     = false;
 let selectedSide     = 'both';   // 'left' / 'right' / 'both' — which limb to track & draw
@@ -249,6 +251,15 @@ async function startCamera() {
         fpsCounter     = 0;
         fpsWindowStart = Date.now();
 
+        // The server keeps each user's Exercise/Game mode in memory for 30 min
+        // after the last use, but this page always loads in "Exercise". If the
+        // last visit used Game mode, the server still drew the FULL body skeleton
+        // instead of the selected exercise. Push the page's mode first.
+        fetch('/api/session/mode', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: sessionMode }),
+        }).catch(e => console.error('session/mode sync failed:', e));
+
         // Tell backend which exercise is active so it draws only relevant joints
         syncExerciseType();
 
@@ -271,6 +282,7 @@ async function syncExerciseType() {
                 exercise_type: document.getElementById('exerciseType').value,
                 target_rom:    parseFloat(document.getElementById('targetRom').value) || 90,
                 side:          selectedSide,
+                mode:          sessionMode,   // keeps server Exercise/Game mode in step with the page
             }),
         });
     } catch(e) { console.error('syncExerciseType:', e); }
@@ -357,6 +369,7 @@ async function stopCamera() {
 // Poll latest pose data (replaces ws.onmessage)
 async function pollPoseData() {
     try {
+        const sentAt = Date.now();
         const res = await fetch('/api/pose_data');
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
@@ -372,7 +385,12 @@ async function pollPoseData() {
             fpsWindowStart = now;
         }
 
-        handlePoseData(data);
+        // On a slow/remote connection responses can arrive late or out of order.
+        // Drop anything older than what we've already applied, and never let a
+        // poll that was sent before the reset completed drive rep counting.
+        if (sentAt < lastPollApplied) return;
+        lastPollApplied = sentAt;
+        handlePoseData(data, sentAt >= resetDoneAt);
     } catch(e) {
         pollFailCount++;
         console.error('pollPoseData:', e);
@@ -384,13 +402,13 @@ async function pollPoseData() {
 }
 
 // Pose data handler 
-function handlePoseData(data) {
+function handlePoseData(data, fresh = true) {
     poseDetected = !!data.detected;
 
     document.getElementById('noPoseWarning').style.display  = poseDetected ? 'none' : 'block';
     document.getElementById('detectionStatus').textContent  = poseDetected ? 'Yes' : 'No';
     document.getElementById('detectionStatus').style.color  = poseDetected ? '#1D8A6D' : '#D9503E';
-    if (sessionActive && repsSyncReady && data.reps != null) {
+    if (sessionActive && repsSyncReady && fresh && data.reps != null) {
         repCount = data.reps;
         const repGoal = parseInt(document.getElementById('targetReps').value);
         if (sessionMode === 'exercise' && repGoal > 0 && repCount >= repGoal) {
@@ -539,13 +557,17 @@ function startSession() {
     syncExerciseType();
     fetch('/api/session/reset', { method: 'POST' })
         .catch(e => console.error('session reset failed:', e))
-        // small delay > poll interval (300ms) so a poll already in flight before
-        // the reset can't deliver an old rep count after we start trusting reps
-        .finally(() => setTimeout(() => { repsSyncReady = true; }, 450));
+        // Polls are tagged with their send time (see pollPoseData); only polls
+        // sent after this moment are trusted for rep counting, so a fixed delay
+        // (which broke on slow production links) is no longer needed.
+        .finally(() => { resetDoneAt = Date.now(); repsSyncReady = true; });
 
     document.getElementById('startSessionBtn').style.display = 'none';
     document.getElementById('stopSessionBtn').style.display  = 'inline-block';
     document.getElementById('statusText').textContent        = 'Session Active';
+    document.getElementById('fsStopBtn').style.display       = 'inline-flex';
+    document.getElementById('fsElapsed').textContent         = '00:00';
+    updateFsHud();
     document.getElementById('statusDot').className           = 'badge-dot recording';
     document.getElementById('recIndicator').classList.add('active');
     document.getElementById('timerRing').classList.add('active');
@@ -558,6 +580,7 @@ function startSession() {
         const m = String(Math.floor(elapsedSec/60)).padStart(2,'0');
         const s = String(elapsedSec%60).padStart(2,'0');
         document.getElementById('sessionTimer').textContent = `${m}:${s}`;
+        document.getElementById('fsElapsed').textContent    = `${m}:${s}`;
     }, 1000);
 
     // Countdown timer
@@ -617,6 +640,9 @@ function stopSession() {
     document.getElementById('recIndicator').classList.remove('active');
     document.getElementById('timerRing').classList.remove('active');
     document.getElementById('remainingTimer').textContent    = '--:--';
+    document.getElementById('fsRemaining').textContent       = '--:--';
+    document.getElementById('fsStopBtn').style.display       = 'none';
+    exitFullscreenIfActive();   // the result modal is not part of the fullscreen element, so it would stay hidden
 
     saveSession();
     showResultModal();
@@ -630,6 +656,8 @@ function updateTimerRing() {
     const m = String(Math.floor(countdownLeft/60)).padStart(2,'0');
     const s = String(countdownLeft%60).padStart(2,'0');
     document.getElementById('timerText').textContent = `${m}:${s}`;
+    const fsRem = document.getElementById('fsRemaining');
+    if (fsRem) fsRem.textContent = `${m}:${s}`;
 }
 
 // Analytics update (fully derived from real backend data, no Math.random) 
@@ -662,6 +690,31 @@ function updateAnalytics(primaryAngle, targetRom) {
     document.getElementById('repProgress').style.width       = `${Math.min(100, (repCount/targetReps)*100)}%`;
 
     updateFeedback(currentAccuracy, currentRom);
+    updateFsHud(targetReps, targetRom);
+}
+
+// Fullscreen HUD (Exercise mode): mirrors the Live Analytics numbers so they stay
+// visible when the camera box is expanded to fullscreen.
+function updateFsHud(targetReps, targetRom) {
+    const $ = id => document.getElementById(id);
+    if (!$('fsHud')) return;
+    targetReps = targetReps || parseInt($('targetReps').value) || 1;
+    targetRom  = targetRom  || parseInt($('targetRom').value)  || 90;
+    const pct = v => `${Math.max(0, Math.min(100, v))}%`;
+    $('fsReps').textContent         = `${repCount} / ${targetReps}`;
+    $('fsRepsBar').style.width      = pct((repCount / targetReps) * 100);
+    $('fsAccuracy').textContent     = `${Math.round(currentAccuracy)}%`;
+    $('fsAccuracyBar').style.width  = pct(currentAccuracy);
+    $('fsRom').textContent          = `${Math.round(currentRom)}° / ${targetRom}°`;
+    $('fsRomBar').style.width       = pct((currentRom / targetRom) * 100);
+    $('fsStability').textContent    = `${Math.round(currentStability)}%`;
+    $('fsStabilityBar').style.width = pct(currentStability);
+}
+
+function exitFullscreenIfActive() {
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    }
 }
 
 function updateFeedback(acc, rom) {
@@ -673,6 +726,11 @@ function updateFeedback(acc, rom) {
     else                        { msg='Consult your therapist for guidance.';     icon='fa-exclamation-circle'; cls='error'; }
     document.getElementById('feedbackDisplay').innerHTML =
         `<div class="feedback-message ${cls}"><i class="fas ${icon}"></i><span>${msg}</span></div>`;
+    const fsFb = document.getElementById('fsFeedback');
+    if (fsFb) {
+        fsFb.className = `fs-feedback ${cls}`;
+        fsFb.innerHTML = `<i class="fas ${icon}"></i><span>${msg}</span>`;
+    }
 }
 
 // Result modal 
@@ -747,6 +805,8 @@ function closeResult() {
     currentSmoothness=100; currentBalance=100; currentFatigue=0;
     document.getElementById('sessionTimer').textContent    = '00:00';
     document.getElementById('remainingTimer').textContent  = '--:--';
+    document.getElementById('fsElapsed').textContent       = '00:00';
+    updateFsHud();
     document.getElementById('accuracyDisplay').textContent = '0%';
     document.getElementById('romDisplay').textContent      = '0°';
     document.getElementById('stabilityDisplay').textContent= '0%';
