@@ -565,9 +565,6 @@ function startSession() {
     document.getElementById('startSessionBtn').style.display = 'none';
     document.getElementById('stopSessionBtn').style.display  = 'inline-block';
     document.getElementById('statusText').textContent        = 'Session Active';
-    document.getElementById('fsStopBtn').style.display       = 'inline-flex';
-    document.getElementById('fsElapsed').textContent         = '00:00';
-    updateFsHud();
     document.getElementById('statusDot').className           = 'badge-dot recording';
     document.getElementById('recIndicator').classList.add('active');
     document.getElementById('timerRing').classList.add('active');
@@ -580,7 +577,6 @@ function startSession() {
         const m = String(Math.floor(elapsedSec/60)).padStart(2,'0');
         const s = String(elapsedSec%60).padStart(2,'0');
         document.getElementById('sessionTimer').textContent = `${m}:${s}`;
-        document.getElementById('fsElapsed').textContent    = `${m}:${s}`;
     }, 1000);
 
     // Countdown timer
@@ -640,9 +636,6 @@ function stopSession() {
     document.getElementById('recIndicator').classList.remove('active');
     document.getElementById('timerRing').classList.remove('active');
     document.getElementById('remainingTimer').textContent    = '--:--';
-    document.getElementById('fsRemaining').textContent       = '--:--';
-    document.getElementById('fsStopBtn').style.display       = 'none';
-    exitFullscreenIfActive();   // the result modal is not part of the fullscreen element, so it would stay hidden
 
     saveSession();
     showResultModal();
@@ -656,8 +649,6 @@ function updateTimerRing() {
     const m = String(Math.floor(countdownLeft/60)).padStart(2,'0');
     const s = String(countdownLeft%60).padStart(2,'0');
     document.getElementById('timerText').textContent = `${m}:${s}`;
-    const fsRem = document.getElementById('fsRemaining');
-    if (fsRem) fsRem.textContent = `${m}:${s}`;
 }
 
 // Analytics update (fully derived from real backend data, no Math.random) 
@@ -690,31 +681,6 @@ function updateAnalytics(primaryAngle, targetRom) {
     document.getElementById('repProgress').style.width       = `${Math.min(100, (repCount/targetReps)*100)}%`;
 
     updateFeedback(currentAccuracy, currentRom);
-    updateFsHud(targetReps, targetRom);
-}
-
-// Fullscreen HUD (Exercise mode): mirrors the Live Analytics numbers so they stay
-// visible when the camera box is expanded to fullscreen.
-function updateFsHud(targetReps, targetRom) {
-    const $ = id => document.getElementById(id);
-    if (!$('fsHud')) return;
-    targetReps = targetReps || parseInt($('targetReps').value) || 1;
-    targetRom  = targetRom  || parseInt($('targetRom').value)  || 90;
-    const pct = v => `${Math.max(0, Math.min(100, v))}%`;
-    $('fsReps').textContent         = `${repCount} / ${targetReps}`;
-    $('fsRepsBar').style.width      = pct((repCount / targetReps) * 100);
-    $('fsAccuracy').textContent     = `${Math.round(currentAccuracy)}%`;
-    $('fsAccuracyBar').style.width  = pct(currentAccuracy);
-    $('fsRom').textContent          = `${Math.round(currentRom)}° / ${targetRom}°`;
-    $('fsRomBar').style.width       = pct((currentRom / targetRom) * 100);
-    $('fsStability').textContent    = `${Math.round(currentStability)}%`;
-    $('fsStabilityBar').style.width = pct(currentStability);
-}
-
-function exitFullscreenIfActive() {
-    if (document.fullscreenElement || document.webkitFullscreenElement) {
-        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
-    }
 }
 
 function updateFeedback(acc, rom) {
@@ -726,11 +692,6 @@ function updateFeedback(acc, rom) {
     else                        { msg='Consult your therapist for guidance.';     icon='fa-exclamation-circle'; cls='error'; }
     document.getElementById('feedbackDisplay').innerHTML =
         `<div class="feedback-message ${cls}"><i class="fas ${icon}"></i><span>${msg}</span></div>`;
-    const fsFb = document.getElementById('fsFeedback');
-    if (fsFb) {
-        fsFb.className = `fs-feedback ${cls}`;
-        fsFb.innerHTML = `<i class="fas ${icon}"></i><span>${msg}</span>`;
-    }
 }
 
 // Result modal 
@@ -805,8 +766,6 @@ function closeResult() {
     currentSmoothness=100; currentBalance=100; currentFatigue=0;
     document.getElementById('sessionTimer').textContent    = '00:00';
     document.getElementById('remainingTimer').textContent  = '--:--';
-    document.getElementById('fsElapsed').textContent       = '00:00';
-    updateFsHud();
     document.getElementById('accuracyDisplay').textContent = '0%';
     document.getElementById('romDisplay').textContent      = '0°';
     document.getElementById('stabilityDisplay').textContent= '0%';
