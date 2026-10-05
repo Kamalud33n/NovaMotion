@@ -4,6 +4,7 @@ attached to THIS machine (services/mjpeg_camera.py -> cv2.VideoCapture(0)),
 which is the only capture path in this build: the server runs on the
 clinic desktop next to the camera.
 """
+import json
 from typing import Dict, Any
 from urllib.parse import urlparse
 
@@ -44,8 +45,12 @@ async def camera_ws(websocket: WebSocket):
     annotated JPEG (skeleton drawn) back. Joint angles / reps / game state
     are still read by the page from /api/pose_data and /api/game/status.
 
-    Protocol: client sends 1 binary frame, waits for the reply, sends the
-    next (natural back-pressure, so latency never builds up).
+    Protocol: client sends binary JPEG frames (at most 2 unanswered at a time, so
+    latency never builds up). Per frame the server sends one JSON text message:
+    {"type": "game", "status": {...}} in game mode, {"type": "pose", "data": {...}}
+    in exercise mode, then the reply itself. With ?overlay=1 the reply is a small
+    {"type": "draw", "l": lines, "d": dots} JSON (the browser draws the skeleton over
+    its own live video); without it the reply is the annotated JPEG as before.
     """
     # 1) Same login check as the HTTP API (cookie -> approved clinical user).
     user = get_optional_user(websocket)  # only reads .cookies, works on a WebSocket
@@ -60,6 +65,7 @@ async def camera_ws(websocket: WebSocket):
         await websocket.close(code=4403)
         return
 
+    overlay = websocket.query_params.get("overlay") == "1"
     ctx = get_context(user.id)   # this doctor's own state
     await websocket.accept()
     ctx.remote_connected()
@@ -75,7 +81,7 @@ async def camera_ws(websocket: WebSocket):
                 continue
             try:
                 # MediaPipe is CPU-heavy: keep it off the asyncio event loop.
-                jpg = await run_in_threadpool(mjpeg_camera.process_frame, ctx, frame)
+                jpg = await run_in_threadpool(mjpeg_camera.process_frame, ctx, frame, overlay)
             except Exception as e:  # never kill the socket over one bad frame
                 print(f"WS camera: processing failed: {e}")
                 await websocket.send_text('{"error":"processing failed"}')
@@ -83,7 +89,31 @@ async def camera_ws(websocket: WebSocket):
             if jpg is None:
                 await websocket.send_text('{"error":"encode failed"}')
                 continue
-            await websocket.send_bytes(jpg)
+            # Game mode: push the live game status over this same socket, right before the
+            # frame. The page used to poll /api/game/status over HTTP (a separate request +
+            # DB lookup for every poll), which is what made the game lag on the deployed
+            # site. Status and frame now travel together, so they are always in step.
+            if ctx.game.get_mode() == "game":
+                try:
+                    status = ctx.game.get_game_status()
+                    if status.get("active_game") is not None:
+                        await websocket.send_text(
+                            json.dumps({"type": "game", "status": status}, default=float))
+                except Exception as e:      # never lose the frame over a status problem
+                    print(f"WS camera: game status failed: {e}")
+            else:
+                # Exercise mode: same idea - push the joint angles / reps / scores with the
+                # frame instead of the page polling /api/pose_data (an HTTP request + DB
+                # lookup every 300 ms, which competed with MediaPipe for the server).
+                try:
+                    await websocket.send_text(
+                        json.dumps({"type": "pose", "data": ctx.pose_data}, default=float))
+                except Exception as e:
+                    print(f"WS camera: pose data failed: {e}")
+            if overlay:
+                await websocket.send_text(json.dumps({"type": "draw", "l": jpg["l"], "d": jpg["d"]}))
+            else:
+                await websocket.send_bytes(jpg)
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -150,6 +180,10 @@ def _reset_session_state(ctx: UserContext):
     session the moment it started."""
     with ctx.process_lock:
         ctx.metrics.reset_state()
+        # Session counter: every pose_data message carries it, so the page can tell a
+        # message produced before this reset (still travelling over the socket) from one
+        # produced after it, and never lets an old session's rep count end the new one.
+        ctx.pose_data["seq"] = ctx.pose_data.get("seq", 0) + 1
         # /api/pose_data serves ctx.pose_data, which is only rewritten when the
         # next frame is processed. Clear the per-session numbers here too,
         # otherwise the old rep count is served until that frame arrives.
@@ -166,7 +200,7 @@ async def api_session_reset(ctx: UserContext = Depends(user_ctx)):
     """Call this right before a session starts so rep count + stability
     buffer don't carry over stale data from a previous session/patient."""
     await run_in_threadpool(_reset_session_state, ctx)   # lock may wait for an in-flight frame
-    return JSONResponse({"success": True})
+    return JSONResponse({"success": True, "seq": ctx.pose_data.get("seq", 0)})
 
 
 @router.get("/api/camera/status")

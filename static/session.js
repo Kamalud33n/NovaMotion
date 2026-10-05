@@ -9,6 +9,8 @@ let elapsedTimer     = null;
 let elapsedSec       = 0;
 
 let currentAccuracy   = 0;
+let currentRomPeak    = 0;     // best ROM of the last ~2.5 s (what the score uses, so resting between reps is not punished)
+let romHist           = [];
 let currentRom        = 0;
 let currentStability  = 0;
 let currentSmoothness = 100;   //  real — from backend frame-jerk variance
@@ -18,6 +20,10 @@ let repCount         = 0;
 let repsSyncReady    = false;   // true once /api/session/reset has landed, so stale reps from the previous session can't auto-stop this one
 let resetDoneAt      = 0;       // Date.now() when /api/session/reset last completed; polls SENT before this carry old-session data
 let lastPollApplied  = 0;       // send-time of the newest /api/pose_data response applied (drops out-of-order responses)
+let resetSeq         = 0;       // server session counter returned by /api/session/reset; pose data with a lower seq is from an older session
+let lastPoseWsAt     = 0;       // performance.now() of the newest pose data pushed over the camera WebSocket
+let lastPoseApplyAt  = -1e9;    // when the page last ran handlePoseData for a pushed message (throttle)
+let poseFallbackBusy = false;   // a fallback /api/pose_data request is already in flight
 
 let poseDetected     = false;
 let selectedSide     = 'both';   // 'left' / 'right' / 'both' — which limb to track & draw
@@ -36,6 +42,8 @@ let pollFailCount    = 0;
 let lastPollOkTime   = 0;
 let fpsCounter       = 0;
 let fpsWindowStart   = Date.now();
+let lastGameWsAt     = 0;      // performance.now() of the newest game status pushed over the camera WebSocket
+let gameFallbackBusy = false;  // a fallback /api/game/status request is already in flight
 
 // Time-series data for result chart
 let _timeline = [];   // [{t, acc, rom, stab}]
@@ -93,22 +101,33 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
-// Camera: the browser opens the patient's webcam (getUserMedia), streams frames
-// to the server over a WebSocket (/ws/camera), and shows the annotated frame
-// (skeleton drawn by MediaPipe on the server) in the same <img id="poseStream">.
+// Camera: the browser opens the patient's webcam (getUserMedia) and shows it live
+// on <canvas id="poseStream"> at full frame rate. Frames are also sent to the server
+// over a WebSocket (/ws/camera?overlay=1); the server answers with the skeleton
+// lines/dots only (tiny JSON) and the browser draws them over its own live video,
+// so the picture stays smooth whatever the network latency is.
 // The server needs NO camera, so this works on any deployed (HTTPS) site.
 function toggleCamera() {
     cameraActive ? stopCamera() : startCamera();
 }
 
-const CAM_MAX_W = 640;            // frames are downscaled to this width before sending
+const CAM_MAX_W = 640;            // frames are downscaled to this width before sending (exercise mode)
 const CAM_JPEG_QUALITY = 0.7;
+const CAM_EX_MAX_W = 512;         // exercise mode (body pose): lighter than before, MediaPipe resizes internally anyway
+const CAM_EX_JPEG_QUALITY = 0.65; // (hand grip / finger exercises keep CAM_MAX_W / CAM_JPEG_QUALITY: small joints need the pixels)
+const CAM_GAME_MAX_W = 480;       // game mode: lighter frames -> faster upload + less MediaPipe/decode work on the server
+const CAM_GAME_JPEG_QUALITY = 0.6;
 const CAM_MIN_INTERVAL_MS = 50;   // cap at ~20 fps
+const CAM_MAX_INFLIGHT = 2;       // frames sent but not answered yet (overlaps upload + server work)
+const CAM_DRAW_MAX_AGE_MS = 700;  // hide a skeleton older than this (no ghost skeleton if replies stop)
+const CAM_STALL_MS = 4000;        // no reply for this long -> the frame/reply was lost, send a fresh one
 // Labels of built-in laptop cameras; anything else is treated as an external USB webcam.
 const INTERNAL_CAM_RE = /integrated|built-?in|internal|facetime|laptop|front/i;
 
 let camStream = null, camWs = null, camVideo = null, camCanvas = null, camCtx = null;
 let camPrevUrl = null, camLastSend = 0, camSendTimer = null;
+let camInFlight = 0, camWatchdog = null;   // frames sent but not answered yet / stall timer
+let camEncoding = false, camRaf = null, camDraw = null, camDrawAt = 0;
 
 function cameraErrorMessage(e) {
     if (!window.isSecureContext) return 'Camera needs HTTPS. Open this site with https:// (or localhost).';
@@ -159,28 +178,118 @@ function camSendFrame() {
         camSendTimer = setTimeout(camSendFrame, 30);
         return;
     }
+    // Game mode uses smaller, lighter frames: on the deployed site the upload + server
+    // decode is what limits the frame rate.
+    const gameMode = sessionMode === 'game';
+    const exName   = (document.getElementById('exerciseType')?.value || '').toLowerCase();
+    const handEx   = exName.includes('grip') || exName.includes('finger');
+    const maxW     = gameMode ? CAM_GAME_MAX_W : handEx ? CAM_MAX_W : CAM_EX_MAX_W;
+    const quality  = gameMode ? CAM_GAME_JPEG_QUALITY : handEx ? CAM_JPEG_QUALITY : CAM_EX_JPEG_QUALITY;
     // Keep the camera's real aspect ratio (a stretched frame would distort joint angles).
-    const w = Math.min(CAM_MAX_W, camVideo.videoWidth);
+    const w = Math.min(maxW, camVideo.videoWidth);
     const h = Math.round(w * camVideo.videoHeight / camVideo.videoWidth);
     if (camCanvas.width !== w || camCanvas.height !== h) { camCanvas.width = w; camCanvas.height = h; }
     camCtx.drawImage(camVideo, 0, 0, w, h);
+    camEncoding = true;
     camCanvas.toBlob(blob => {
-        if (blob && cameraActive && camWs && camWs.readyState === WebSocket.OPEN) {
+        camEncoding = false;
+        if (!cameraActive || !camWs || camWs.readyState !== WebSocket.OPEN) return;
+        if (blob) {
             camLastSend = performance.now();
+            camInFlight++;
+            camArmWatchdog();
             camWs.send(blob);
+            if (camInFlight < CAM_MAX_INFLIGHT) camScheduleNext();
+        } else {
+            camScheduleNext();   // encoder gave nothing (tab hidden / busy): retry instead of stalling for good
         }
-    }, 'image/jpeg', CAM_JPEG_QUALITY);
+    }, 'image/jpeg', quality);
+}
+
+// If a frame or its reply is lost (proxy hiccup, slow server), nothing would ever trigger
+// the next send and the stream would freeze for good. This sends a fresh frame instead.
+function camArmWatchdog() {
+    clearTimeout(camWatchdog);
+    camWatchdog = setTimeout(() => {
+        camWatchdog = null;
+        if (!cameraActive || !camWs || camWs.readyState !== WebSocket.OPEN) return;
+        console.warn('camera stream stalled - sending a fresh frame');
+        camInFlight = 0;
+        if (camSendTimer) { clearTimeout(camSendTimer); camSendTimer = null; }
+        camSendFrame();
+    }, CAM_STALL_MS);
+}
+
+// The server answered one frame (annotated image, or an error for it).
+function camReplyReceived() {
+    camInFlight = Math.max(0, camInFlight - 1);
+    clearTimeout(camWatchdog);
+    camWatchdog = null;
+    if (camInFlight > 0) camArmWatchdog();
+    if (camInFlight < CAM_MAX_INFLIGHT) camScheduleNext();
+}
+
+// Real frame rate = annotated frames received per second.
+function countFrameForFps() {
+    fpsCounter++;
+    const now = Date.now();
+    if (now - fpsWindowStart >= 1000) {
+        document.getElementById('fpsDisplay').textContent = fpsCounter;
+        fpsCounter = 0;
+        fpsWindowStart = now;
+    }
 }
 
 // Send the next frame only after the previous annotated one came back (no lag build-up).
 function camScheduleNext() {
-    if (camSendTimer) return;
+    if (camSendTimer || camEncoding) return;
     const wait = Math.max(0, CAM_MIN_INTERVAL_MS - (performance.now() - camLastSend));
     camSendTimer = setTimeout(camSendFrame, wait);
 }
 
+// Draws the live local video (mirrored, like the server's frame) and the latest skeleton.
+function camRenderLoop() {
+    camRaf = requestAnimationFrame(camRenderLoop);
+    const cv = document.getElementById('poseStream');
+    if (!cv || !camVideo || !camVideo.videoWidth) return;
+    const w = Math.min(960, camVideo.videoWidth);
+    const h = Math.round(w * camVideo.videoHeight / camVideo.videoWidth);
+    if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+    const c = cv.getContext('2d');
+    c.save();
+    c.translate(w, 0);
+    c.scale(-1, 1);
+    c.drawImage(camVideo, 0, 0, w, h);
+    c.restore();
+    if (!camDraw || performance.now() - camDrawAt > CAM_DRAW_MAX_AGE_MS) return;
+    c.lineWidth = Math.max(2, w / 320);
+    c.strokeStyle = '#00a0ff';
+    c.lineCap = 'round';
+    c.beginPath();
+    for (const l of camDraw.l) {
+        c.moveTo(l[0] * w, l[1] * h);
+        c.lineTo(l[2] * w, l[3] * h);
+    }
+    c.stroke();
+    const rad = Math.max(3, w / 200);
+    c.fillStyle = '#78e600';
+    c.strokeStyle = '#ffffff';
+    c.lineWidth = 1;
+    for (const d of camDraw.d) {
+        c.beginPath();
+        c.arc(d[0] * w, d[1] * h, rad, 0, 6.2832);
+        c.fill();
+        c.stroke();
+    }
+}
+
 function camCleanup() {
+    if (camRaf) { cancelAnimationFrame(camRaf); camRaf = null; }
+    camDraw = null;
+    camEncoding = false;
     if (camSendTimer) { clearTimeout(camSendTimer); camSendTimer = null; }
+    if (camWatchdog) { clearTimeout(camWatchdog); camWatchdog = null; }
+    camInFlight = 0;
     if (camWs) {
         camWs.onopen = camWs.onmessage = camWs.onerror = camWs.onclose = null;
         try { camWs.close(); } catch (e) {}
@@ -213,23 +322,34 @@ async function startCamera() {
     camCtx = camCanvas.getContext('2d');
 
     const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${wsProto}://${location.host}/ws/camera`);
-    ws.binaryType = 'blob';
+    const ws = new WebSocket(`${wsProto}://${location.host}/ws/camera?overlay=1`);
     camWs = ws;
 
-    let gotFrame = false;
     ws.onmessage = (ev) => {
-        if (typeof ev.data === 'string') {          // server-side error for one frame, keep going
-            console.warn('camera ws:', ev.data);
-            camScheduleNext();
+        if (typeof ev.data === 'string') {
+            let msg = null;
+            try { msg = JSON.parse(ev.data); } catch (e) { /* not JSON */ }
+            if (msg && msg.type === 'game') {        // live game status, pushed right before each annotated frame
+                lastGameWsAt = performance.now();
+                applyGameStatus(msg.status);
+                return;                              // the frame that follows triggers the next send
+            }
+            if (msg && msg.type === 'pose') {        // exercise-mode joint angles / reps / scores, same idea
+                lastPoseWsAt = performance.now();
+                applyPoseMessage(msg.data);
+                return;
+            }
+            if (msg && msg.type === 'draw') {        // skeleton for one frame = the reply to that frame
+                camDraw = msg;
+                camDrawAt = performance.now();
+                countFrameForFps();
+                camReplyReceived();
+                return;
+            }
+            console.warn('camera ws:', ev.data);     // server-side error for one frame, keep going
+            camReplyReceived();
             return;
         }
-        const url = URL.createObjectURL(ev.data);
-        img.src = url;
-        if (!gotFrame) { gotFrame = true; img.style.display = 'block'; }
-        if (camPrevUrl) URL.revokeObjectURL(camPrevUrl);
-        camPrevUrl = url;
-        camScheduleNext();
     };
     ws.onclose = (ev) => {
         if (!cameraActive && !camStream) return;    // we closed it ourselves
@@ -240,6 +360,8 @@ async function startCamera() {
     };
     ws.onopen = () => {
         cameraActive = true;
+        img.style.display = 'block';
+        if (!camRaf) camRaf = requestAnimationFrame(camRenderLoop);
         document.getElementById('cameraPlaceholder').style.display = 'none';
         document.getElementById('cameraStatusText').textContent    = 'Connected';
         document.getElementById('cameraStatus').classList.add('active');
@@ -263,8 +385,10 @@ async function startCamera() {
         // Tell backend which exercise is active so it draws only relevant joints
         syncExerciseType();
 
-        // Poll joint-angle/detection data independently of the video stream
-        poseInterval = setInterval(pollPoseData, 300);
+        // Joint-angle/detection data normally arrives over this same WebSocket with every
+        // frame (see ws.onmessage). This slow poll is only a fallback for when the socket
+        // goes quiet - it also detects a lost connection.
+        poseInterval = setInterval(pollPoseData, 1000);
 
         camSendFrame();
     };
@@ -340,8 +464,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
 async function stopCamera() {
     const img = document.getElementById('poseStream');
-    img.onerror = null;
-    img.src = '';
     img.style.display = 'none';
     cameraActive = false;
     poseDetected = false;
@@ -367,7 +489,25 @@ async function stopCamera() {
 }
 
 // Poll latest pose data (replaces ws.onmessage)
+// Pose data pushed over the camera WebSocket (one message per annotated frame).
+// The DOM only needs ~10 updates/s, so extra messages are skipped.
+function applyPoseMessage(data) {
+    if (!data || sessionMode === 'game') return;
+    pollFailCount = 0;
+    const now = performance.now();
+    if (now - lastPoseApplyAt < 100) return;
+    lastPoseApplyAt = now;
+    // A message produced before the last /api/session/reset (still on its way) carries the
+    // previous session's reps: it must never drive rep counting for this session.
+    handlePoseData(data, (data.seq || 0) >= resetSeq);
+}
+
+// Fallback poll (every 1 s) - does nothing while the WebSocket is delivering pose data.
 async function pollPoseData() {
+    if (sessionMode === 'game') return;   // game mode has its own status feed
+    if (performance.now() - lastPoseWsAt < 800) return;   // pushed data is fresh
+    if (poseFallbackBusy) return;                         // never stack requests on a slow link
+    poseFallbackBusy = true;
     try {
         const sentAt = Date.now();
         const res = await fetch('/api/pose_data');
@@ -376,21 +516,12 @@ async function pollPoseData() {
         pollFailCount = 0;
         lastPollOkTime = Date.now();
 
-        // crude FPS readout based on poll cadence/responsiveness
-        fpsCounter++;
-        const now = Date.now();
-        if (now - fpsWindowStart >= 1000) {
-            document.getElementById('fpsDisplay').textContent = fpsCounter;
-            fpsCounter = 0;
-            fpsWindowStart = now;
-        }
-
         // On a slow/remote connection responses can arrive late or out of order.
         // Drop anything older than what we've already applied, and never let a
         // poll that was sent before the reset completed drive rep counting.
         if (sentAt < lastPollApplied) return;
         lastPollApplied = sentAt;
-        handlePoseData(data, sentAt >= resetDoneAt);
+        handlePoseData(data, sentAt >= resetDoneAt && (data.seq || 0) >= resetSeq);
     } catch(e) {
         pollFailCount++;
         console.error('pollPoseData:', e);
@@ -398,6 +529,8 @@ async function pollPoseData() {
             document.getElementById('statusText').textContent = 'Connection lost';
             document.getElementById('statusDot').className    = 'badge-dot error';
         }
+    } finally {
+        poseFallbackBusy = false;
     }
 }
 
@@ -544,7 +677,8 @@ function startSession() {
     sessionStartTime = Date.now();
     countdownLeft    = countdownTotal;
     elapsedSec       = 0;
-    repCount = currentAccuracy = currentRom = 0;
+    repCount = currentAccuracy = currentRom = currentRomPeak = 0;
+    romHist = [];
     currentStability  = 100;
     currentSmoothness = 100;
     currentBalance    = 100;
@@ -556,6 +690,8 @@ function startSession() {
     repsSyncReady = false;
     syncExerciseType();
     fetch('/api/session/reset', { method: 'POST' })
+        .then(r => r.json())
+        .then(j => { if (j && j.seq != null) resetSeq = j.seq; })   // pose data older than this belongs to the previous session
         .catch(e => console.error('session reset failed:', e))
         // Polls are tagged with their send time (see pollPoseData); only polls
         // sent after this moment are trusted for rep counting, so a fixed delay
@@ -606,7 +742,7 @@ function startSession() {
             _timeline.push({
                 t:      elapsedSec,
                 acc:    +currentAccuracy.toFixed(1),
-                rom:    +currentRom.toFixed(1),
+                rom:    +currentRomPeak.toFixed(1),
                 stab:   +currentStability.toFixed(1),
                 smooth: +currentSmoothness.toFixed(1),
                 bal:    +currentBalance.toFixed(1),
@@ -656,7 +792,11 @@ function updateAnalytics(primaryAngle, targetRom) {
     if (!(targetRom > 0)) targetRom = 90;   // empty/invalid target ROM used to give NaN% bars
     if (primaryAngle != null) {
         currentRom = Math.min(targetRom, Math.max(0, primaryAngle));
-        const romPct = Math.min(100, (currentRom / targetRom) * 100);
+        const nowMs = performance.now();
+        romHist.push({ t: nowMs, v: currentRom });
+        while (romHist.length && nowMs - romHist[0].t > 2500) romHist.shift();
+        currentRomPeak = romHist.reduce((m, r) => Math.max(m, r.v), 0);
+        const romPct = Math.min(100, (currentRomPeak / targetRom) * 100);
         // Accuracy = form quality, not just "did the joint reach the target
         // angle". A jerky/unstable rep can still touch the target ROM, so
         // blend in the real stability + smoothness scores (same weighting
@@ -690,7 +830,11 @@ function updateFeedback(acc, rom) {
     else if (acc>70&&rom>t*0.6) { msg='Good progress. Focus on range of motion.'; icon='fa-thumbs-up';         cls='warning'; }
     else if (acc>50)            { msg='Needs improvement. Adjust your posture.';  icon='fa-exclamation-triangle'; cls='warning'; }
     else                        { msg='Consult your therapist for guidance.';     icon='fa-exclamation-circle'; cls='error'; }
-    document.getElementById('feedbackDisplay').innerHTML =
+    const fb = document.getElementById('feedbackDisplay');
+    const key = cls + '|' + msg;
+    if (fb.dataset.key === key) return;      // runs ~10x/s now - only rebuild the DOM when the message changes
+    fb.dataset.key = key;
+    fb.innerHTML =
         `<div class="feedback-message ${cls}"><i class="fas ${icon}"></i><span>${msg}</span></div>`;
 }
 
@@ -772,6 +916,7 @@ function closeResult() {
     document.getElementById('repCounter').textContent      = '0 / 0';
     ['accuracyProgress','romProgress','stabilityProgress','repProgress']
         .forEach(id => document.getElementById(id).style.width='0%');
+    document.getElementById('feedbackDisplay').dataset.key = '';   // let updateFeedback() rebuild it next time
     document.getElementById('feedbackDisplay').innerHTML =
         '<div class="feedback-message"><i class="fas fa-info-circle"></i><span>Start session to receive feedback</span></div>';
 }
@@ -931,6 +1076,8 @@ const GW = 900, GH = 460, G_HORIZON = 100, G_PLAYER_Y = 372, G_NEAR_HW = 300, G_
 const G_MAXD = 50, G_REACT_D = 30, G_DFAR = 2000;
 const G_LANE_W = 2 * G_NEAR_HW / 3, G_BEAM_TOP = 125, G_BEAM_T = 35;
 const G_SMOOTH_X = 10;
+const G_JUDGE_GRACE_S = 0.25;   // an obstacle is judged on the player's last 0.25 s, not one instant (network/status jitter)
+const G_TIME_SCALE = 3.0;   // game-time seconds per real second (= the old fixed dt 0.05 at 60 fps)
 const G_STRIDE = 5, G_STRIDE_SPEED = 20, G_MAX_Q = 15;
 const G_SPAWN_MIN = 32, G_SPAWN_MAX = 42;
 const gScale = d => G_FOCAL / (G_FOCAL + d);
@@ -976,6 +1123,7 @@ const gMountains = []; let gMTOT = 0;
 function newGameCanvasState() {
     GG = {
         score: 0, lives: 3, obstacles: [], spawnD: 8, lastTypes: [],
+        cleared: 0, hits: 0, rt: 0, hist: [],   // obstacle tally + the player's last few hundred ms
         moveQ: 0, roadOff: 0, bg: 0, shake: 0, popups: [], sparks: [], idleT: 0, t: 0,
         player: { lane: 1, x: gLx(1, 0), state: 'RUN', t: 0, flash: 0 },
     };
@@ -999,20 +1147,28 @@ function spawnSparks(x, y, color, n) {
     }
 }
 
-function updateGamePlayer() {
+function updateGamePlayer(realDt) {
     const p = GG.player, s = gameLiveStatus;
     const xn = Math.max(-1, Math.min(1, Number(s.x_norm) || 0));
     const tx = GW / 2 + xn * G_LANE_W;
     if (s.lane !== undefined) p.lane = s.lane;
-    p.x += (tx - p.x) * Math.min(1, 0.05 * G_SMOOTH_X);
+    // time-based easing (== the old 0.5 per frame at 60 fps), so it feels the same at any refresh rate / frame time
+    p.x += (tx - p.x) * (1 - Math.pow(1 - Math.min(1, 0.05 * G_SMOOTH_X), realDt * 60));
     p.state = s.crouching ? 'CROUCH' : 'RUN';
-    if (p.flash > 0) p.flash -= 0.05;
+    if (p.flash > 0) p.flash -= 3 * realDt;
 }
 
-function updateGameCanvas() {
-    const dt = 0.05; // fixed step (canvas polls status ~10x/sec; render runs at 60fps but game logic ticks per animation frame at this nominal rate)
+function updateGameCanvas(realDt) {
+    // Real elapsed time (not a fixed step per animation frame), so the game runs at the same
+    // speed on a 30 Hz / 60 Hz / 144 Hz screen and a slow frame doesn't slow the world down.
+    const dt = realDt * G_TIME_SCALE;
     GG.t += dt;
-    updateGamePlayer();
+    updateGamePlayer(realDt);
+    // Remember where the player was / whether they were crouching for the last ~0.4 s
+    // (real time), so an obstacle can be judged fairly - see below.
+    GG.rt += realDt;
+    GG.hist.push({ t: GG.rt, x: GG.player.x, crouch: GG.player.state === 'CROUCH' });
+    while (GG.hist.length && GG.rt - GG.hist[0].t > 0.4) GG.hist.shift();
     GG.popups.forEach(o => { o.life -= dt; o.y -= 40 * dt; });
     GG.popups = GG.popups.filter(o => o.life > 0);
     GG.sparks.forEach(o => { o.life -= dt; o.x += o.vx * dt; o.y += o.vy * dt; o.vy += 160 * dt; });
@@ -1041,9 +1197,20 @@ function updateGameCanvas() {
         o.d -= adv;
         if (!o.resolved && o.d <= 0.8) {
             o.resolved = true;
+            // Judge the player's last G_JUDGE_GRACE_S seconds instead of a single instant.
+            // The status reaches the page ~10-20x/s (more on a slow connection), so one
+            // late/flickering sample used to turn a correct dodge/crouch into an OUCH.
+            // BLOCK: a hit only if the player stayed in the obstacle's lane the whole window.
+            // CROUCH: a hit only if the player was not crouching at any point in the window.
+            const recent = GG.hist.filter(h => GG.rt - h.t <= G_JUDGE_GRACE_S);
             let hit = false;
-            if (o.type === 'BLOCK') hit = Math.abs(p.x - gLx(o.lane, 0)) < G_LANE_W * 0.55;
-            else hit = p.state !== 'CROUCH';
+            if (o.type === 'BLOCK') {
+                const inLane = x => Math.abs(x - gLx(o.lane, 0)) < G_LANE_W * 0.55;
+                hit = recent.length ? recent.every(h => inLane(h.x)) : inLane(p.x);
+            } else {
+                hit = recent.length ? !recent.some(h => h.crouch) : p.state !== 'CROUCH';
+            }
+            if (hit) GG.hits++; else GG.cleared++;
             if (hit) {
                 GG.lives--; p.flash = 0.5; GG.shake = 0.25;
                 GG.popups.push({ x: p.x - 10, y: G_PLAYER_Y - 120, text: 'OUCH', color: '#ff5a5a', life: 0.8 });
@@ -1250,9 +1417,12 @@ function renderGameCanvas() {
     gctx.restore();
 }
 
-function gameCanvasFrame() {
+let gameLastTs = 0;           // rAF timestamp of the previous canvas frame
+function gameCanvasFrame(ts) {
     if (!gameCanvasOn) return;
-    if (gameLiveStatus.calibrated && gameLiveStatus.person === 'ok') updateGameCanvas();
+    const realDt = gameLastTs ? Math.min(0.1, Math.max(0.001, (ts - gameLastTs) / 1000)) : 1 / 60;
+    gameLastTs = ts;
+    if (gameLiveStatus.calibrated && gameLiveStatus.person === 'ok') updateGameCanvas(realDt);
     renderGameCanvas();
     gameRAF = requestAnimationFrame(gameCanvasFrame);
 }
@@ -1260,6 +1430,7 @@ function showGameCanvas() {
     gcv.style.display = 'block';
     newGameCanvasState();
     gameLastSteps = gameLiveStatus.steps || 0;
+    gameLastTs = 0;
     if (!gameCanvasOn) { gameCanvasOn = true; gameRAF = requestAnimationFrame(gameCanvasFrame); }
 
     // Move the live pose stream into the side "Patient Camera" panel so the
@@ -1435,7 +1606,8 @@ async function startGameSession() {
     document.getElementById('gameStepsProgress').style.width = '0%';
 
     showGameCanvas();
-    gamePollInterval = setInterval(pollGameStatus, 120);
+    lastGameWsAt = 0;
+    gamePollInterval = setInterval(pollGameStatus, 1000);   // fallback only - normal updates arrive over the camera WebSocket
     showToast('Calibrating — stand still in frame...', 'success');
 }
 
@@ -1444,26 +1616,39 @@ function targetStepsLabel() {
     return v > 0 ? v : '∞';
 }
 
-// Poll the active game engine's live status and drive the HUD
-async function pollGameStatus() {
-    let data;
-    try {
-        data = await (await fetch('/api/game/status')).json();
-    } catch (e) {
-        console.error('pollGameStatus:', e);
-        return;
-    }
+// Cheap DOM writers: the status now arrives with every camera frame (~15-20x/s), so
+// only touch the DOM when a value actually changed.
+function hudText(id, v) {
+    const el = document.getElementById(id);
+    if (el && el.textContent !== v) el.textContent = v;
+}
+function hudWidth(id, pct) {
+    const el = document.getElementById(id);
+    const v = `${pct}%`;
+    if (el && el.style.width !== v) el.style.width = v;
+}
+
+// Drive the HUD / canvas from one game status object. Called for every status the
+// server pushes over the camera WebSocket (and by the slow fallback poll below).
+function applyGameStatus(data) {
+    if (!sessionActive || sessionMode !== 'game') return;
     if (!data || data.active_game == null) return;
     gameLiveStatus = data;   // feeds the canvas render loop (showGameCanvas/gameCanvasFrame)
 
+    // "No pose" overlay (this used to come from the /api/pose_data poll)
+    poseDetected = data.person !== 'none';
+    const warn = document.getElementById('noPoseWarning');
+    if (warn) warn.style.display = poseDetected ? 'none' : 'block';
+
     // Calibration
     if (data.calibrating && !data.calibrated) {
-        document.getElementById('gameCalibDisplay').textContent  = `Calibrating... ${Math.round((data.calib_progress||0)*100)}%`;
-        document.getElementById('gameCalibProgress').style.width = `${(data.calib_progress||0)*100}%`;
-        document.getElementById('statusText').textContent        = 'Calibrating...';
+        const pct = Math.round((data.calib_progress || 0) * 100);
+        hudText('gameCalibDisplay', `Calibrating... ${pct}%`);
+        hudWidth('gameCalibProgress', pct);
+        hudText('statusText', 'Calibrating...');
     } else if (data.calibrated) {
-        document.getElementById('gameCalibDisplay').textContent  = 'Ready';
-        document.getElementById('gameCalibProgress').style.width = '100%';
+        hudText('gameCalibDisplay', 'Ready');
+        hudWidth('gameCalibProgress', 100);
         if (sessionActive && document.getElementById('statusText').textContent === 'Calibrating...') {
             document.getElementById('statusText').textContent = 'Session Active';
         }
@@ -1472,31 +1657,36 @@ async function pollGameStatus() {
     // Steps / target progress
     const steps = data.steps || 0;
     const targetSteps = data.target_steps;
-    document.getElementById('gameStepsDisplay').textContent  = `${steps} / ${targetSteps != null ? targetSteps : '∞'}`;
-    document.getElementById('gameStepsProgress').style.width = targetSteps ? `${Math.min(100, (steps/targetSteps)*100)}%` : '0%';
+    hudText('gameStepsDisplay', `${steps} / ${targetSteps != null ? targetSteps : '∞'}`);
+    hudWidth('gameStepsProgress', targetSteps ? Math.min(100, (steps / targetSteps) * 100) : 0);
 
     // Lane + crouch
     const laneNames = { 0: 'Left', 1: 'Center', 2: 'Right' };
-    document.getElementById('gameLaneDisplay').textContent   = laneNames[data.lane] ?? '--';
-    document.getElementById('gameCrouchDisplay').textContent = data.crouching ? 'Yes' : 'No';
+    hudText('gameLaneDisplay', laneNames[data.lane] ?? '--');
+    hudText('gameCrouchDisplay', data.crouching ? 'Yes' : 'No');
 
     // Timers (shared elements with exercise mode)
     if (data.calibrated) {
         elapsedSec = Math.round(data.elapsed_seconds || 0);
         const m = String(Math.floor(elapsedSec/60)).padStart(2,'0');
         const s = String(elapsedSec%60).padStart(2,'0');
-        document.getElementById('sessionTimer').textContent = `${m}:${s}`;
+        hudText('sessionTimer', `${m}:${s}`);
         if (data.duration_seconds != null && data.remaining_seconds != null) {
-            document.getElementById('remainingTimer').textContent = formatDuration(Math.ceil(data.remaining_seconds));
+            hudText('remainingTimer', formatDuration(Math.ceil(data.remaining_seconds)));
         }
     }
 
     // Feedback / guidance message
     if (data.message) {
-        const cls = data.level === 'error' ? 'error' : data.level === 'ok' ? 'success' : 'warning';
-        const icon = data.level === 'ok' ? 'fa-check-circle' : data.level === 'error' ? 'fa-exclamation-circle' : 'fa-info-circle';
-        document.getElementById('gameFeedbackDisplay').innerHTML =
-            `<div class="feedback-message ${cls}"><i class="fas ${icon}"></i><span>${data.message}</span></div>`;
+        const fb = document.getElementById('gameFeedbackDisplay');
+        const key = `${data.level}|${data.message}`;
+        if (fb && fb.dataset.key !== key) {
+            fb.dataset.key = key;
+            const cls = data.level === 'error' ? 'error' : data.level === 'ok' ? 'success' : 'warning';
+            const icon = data.level === 'ok' ? 'fa-check-circle' : data.level === 'error' ? 'fa-exclamation-circle' : 'fa-info-circle';
+            fb.innerHTML =
+                `<div class="feedback-message ${cls}"><i class="fas ${icon}"></i><span>${data.message}</span></div>`;
+        }
     }
 
     // Auto-finish (target reached or time up)
@@ -1505,6 +1695,26 @@ async function pollGameStatus() {
         showToast(data.finish_reason === 'target' ? '🎯 Target reached!' : '⏰ Time up!', 'success');
         finishGameSession(data.finish_reason);
     }
+}
+
+// Fallback poll (every 1 s). Normally the server pushes the game status over the camera
+// WebSocket with every frame, so this does nothing; it only kicks in if frames stall, so
+// the time limit / finish state is still noticed.
+async function pollGameStatus() {
+    if (!sessionActive || sessionMode !== 'game') return;
+    if (performance.now() - lastGameWsAt < 800) return;   // WebSocket status is fresh
+    if (gameFallbackBusy) return;                         // never stack requests on a slow link
+    gameFallbackBusy = true;
+    let data;
+    try {
+        data = await (await fetch('/api/game/status')).json();
+    } catch (e) {
+        console.error('pollGameStatus:', e);
+        return;
+    } finally {
+        gameFallbackBusy = false;
+    }
+    applyGameStatus(data);
 }
 
 // Manual stop (before target/time reached)
@@ -1548,7 +1758,14 @@ async function saveGameSessionPayload(summary, reason) {
     const rightSteps  = summary.right_steps || 0;
     const targetSteps = summary.target_steps;
     const durationSec = summary.elapsed_seconds || elapsedSec || 0;
-    const accuracy    = targetSteps ? Math.min(100, (steps/targetSteps)*100) : 100;
+    // Accuracy = how well the patient handled the obstacles (cleared / judged). It used to
+    // be steps/targetSteps only, so a session that ended on the time limit before the step
+    // target scored low even when every movement was right. Target progress is still saved
+    // separately (session_data.target_progress) and is the fallback if no obstacle was judged.
+    const judged    = GG ? GG.cleared + GG.hits : 0;
+    const clearRate = judged > 0 ? (GG.cleared / judged) * 100 : null;
+    const progress  = targetSteps ? Math.min(100, (steps/targetSteps)*100) : null;
+    const accuracy  = clearRate != null ? clearRate : (progress != null ? progress : (steps > 0 ? 100 : 0));
     // GG (canvas game state) is still holding its last values here — hideGameCanvas()
     // (called by finishGameSession() just before this) stops the render loop but does
     // not clear GG; that only happens on the next showGameCanvas().
@@ -1584,6 +1801,10 @@ async function saveGameSessionPayload(summary, reason) {
             right_steps:      rightSteps,
             final_score:      finalScore,
             lives_remaining:  livesLeft,
+            obstacles_cleared: GG ? GG.cleared : 0,
+            obstacles_hit:     GG ? GG.hits : 0,
+            clear_rate:        clearRate != null ? +clearRate.toFixed(1) : null,
+            target_progress:   progress != null ? +progress.toFixed(1) : null,
             events:           summary.events || [],
         },
     };
@@ -1607,7 +1828,8 @@ function showGameResultModal(summary, reason) {
     document.getElementById('res_stability').textContent = reason === 'target' ? 'Target' : reason === 'time' ? 'Time up' : 'Manual stop';
 
     document.getElementById('resultSubtitle').textContent =
-        `${g ? g.label : 'Game'} · ${durStr} · ${document.querySelector('#sessionPatientSelect option:checked')?.textContent || ''}`;
+        `${g ? g.label : 'Game'} · ${durStr} · ${document.querySelector('#sessionPatientSelect option:checked')?.textContent || ''}` +
+        (GG ? ` · Score ${GG.score}` + ((GG.cleared + GG.hits) ? ` · Cleared ${GG.cleared}/${GG.cleared + GG.hits}` : '') : '');
 
     // No timeline chart for game sessions — hide the chart canvas area if present
     const chartWrap = document.querySelector('.result-chart-wrap');

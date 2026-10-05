@@ -246,6 +246,64 @@ def _draw_filtered_skeleton(frame, landmarks, exercise_type: str, side: str = "b
             cv2.circle(frame, p, 3, (255, 255, 255), 1, cv2.LINE_AA)
 
 
+def _r(v):
+    return round(float(v), 3)
+
+
+def _items_pose_full(items, landmarks):
+    pts = {}
+    for i, lmk in enumerate(landmarks):
+        if lmk.visibility >= _VISIBILITY_THRESHOLD:
+            pts[i] = (_r(lmk.x), _r(lmk.y))
+    for a, b in (POSE_CONNECTIONS or ()):
+        if a in pts and b in pts:
+            items["l"].append([pts[a][0], pts[a][1], pts[b][0], pts[b][1]])
+    items["d"].extend([list(p) for p in pts.values()])
+
+
+def _items_pose_filtered(items, landmarks, exercise_type, side):
+    def _pt(name):
+        idx = KEY_LANDMARKS.get(name)
+        if idx is None or idx >= len(landmarks):
+            return None
+        lmk = landmarks[idx]
+        if lmk.visibility < _VISIBILITY_THRESHOLD:
+            return None
+        return (_r(lmk.x), _r(lmk.y))
+
+    conns = _get_active_connections(exercise_type, side)
+    names = set()
+    for a, b in conns:
+        names.add(a)
+        names.add(b)
+        pa, pb = _pt(a), _pt(b)
+        if pa and pb:
+            items["l"].append([pa[0], pa[1], pb[0], pb[1]])
+    for n in names:
+        p = _pt(n)
+        if p:
+            items["d"].append(list(p))
+
+
+def _items_hands(items, hand_landmarks_list):
+    for hl in hand_landmarks_list:
+        lm = hl.landmark
+        for a, b in (_HAND_CONNECTIONS or ()):
+            items["l"].append([_r(lm[a].x), _r(lm[a].y), _r(lm[b].x), _r(lm[b].y)])
+        for pt in lm:
+            items["d"].append([_r(pt.x), _r(pt.y)])
+
+
+def _finish(frame, overlay, items):
+    if overlay:
+        return items
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+    if not ok:
+        print("MJPEG: JPEG encode failed, skipping this frame")
+        return None
+    return buf.tobytes()
+
+
 _MAX_CAMERA_PROBE_INDEX = 4  # auto-detect probes indices 0..4
 
 
@@ -392,7 +450,7 @@ def _mjpeg_release_camera(ctx: Optional[UserContext] = None):
         ctx.reset_pose_data()
 
 
-def process_frame(ctx: UserContext, frame) -> Optional[bytes]:
+def process_frame(ctx: UserContext, frame, overlay: bool = False):
     """Run the full pose / game pipeline on ONE BGR frame (as delivered by a
     camera) and return the annotated JPEG bytes, or None if the frame could
     not be encoded. Shared by the server-camera MJPEG generator (gen_frames)
@@ -402,10 +460,11 @@ def process_frame(ctx: UserContext, frame) -> Optional[bytes]:
     SAME user are processed one at a time (their trackers are stateful)."""
     with ctx.process_lock:
         ctx.touch()
-        return _process_frame_locked(ctx, frame)
+        return _process_frame_locked(ctx, frame, overlay)
 
 
-def _process_frame_locked(ctx: UserContext, frame) -> Optional[bytes]:
+def _process_frame_locked(ctx: UserContext, frame, overlay: bool = False):
+    items = {"l": [], "d": []}
     m = ctx.metrics
     g = ctx.game
     frame = cv2.flip(frame, 1)  # mirror, like the reference app
@@ -432,11 +491,14 @@ def _process_frame_locked(ctx: UserContext, frame) -> Optional[bytes]:
         now = time.time()
 
         if game_person_found and mp_drawing is not None:
-            mp_drawing.draw_landmarks(
-                frame, game_results.pose_landmarks, POSE_CONNECTIONS,
-                landmark_drawing_spec=_MJPEG_LANDMARK_SPEC,
-                connection_drawing_spec=_MJPEG_CONNECTION_SPEC,
-            )
+            if overlay:
+                _items_pose_full(items, game_results.pose_landmarks.landmark)
+            else:
+                mp_drawing.draw_landmarks(
+                    frame, game_results.pose_landmarks, POSE_CONNECTIONS,
+                    landmark_drawing_spec=_MJPEG_LANDMARK_SPEC,
+                    connection_drawing_spec=_MJPEG_CONNECTION_SPEC,
+                )
             g.process_frame(
                 game_results.pose_landmarks.landmark,
                 game_results.pose_world_landmarks,
@@ -449,11 +511,7 @@ def _process_frame_locked(ctx: UserContext, frame) -> Optional[bytes]:
         ctx.pose_data["detected"] = game_person_found
         ctx.pose_data["ts"] = datetime.datetime.now().isoformat()
 
-        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        if not ok:
-            print("MJPEG: JPEG encode failed, skipping this frame")
-            return None
-        return buf.tobytes()
+        return _finish(frame, overlay, items)
 
     active_exercise, target_rom, side = m.get_exercise_state()
     hand_mode = _is_hand_exercise(active_exercise)
@@ -487,7 +545,10 @@ def _process_frame_locked(ctx: UserContext, frame) -> Optional[bytes]:
         detected = hand_found
 
         if hand_found:
-            _draw_hand_skeleton(frame, selected_hands)
+            if overlay:
+                _items_hands(items, selected_hands)
+            else:
+                _draw_hand_skeleton(frame, selected_hands)
             # Single-hand exercise: first selected hand drives angles/reps.
             lm0 = selected_hands[0].landmark
             angles = metrics.compute_finger_curl_angles(lm0)
@@ -514,11 +575,7 @@ def _process_frame_locked(ctx: UserContext, frame) -> Optional[bytes]:
         ctx.pose_data["fatigue"]       = fatigue
         ctx.pose_data["primary_angle"] = primary_angle
 
-        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        if not ok:
-            print("MJPEG: JPEG encode failed, skipping this frame")
-            return None
-        return buf.tobytes()
+        return _finish(frame, overlay, items)
 
     # ── Regular body-pose path (all other exercise types) ─────────
     results = None
@@ -535,17 +592,6 @@ def _process_frame_locked(ctx: UserContext, frame) -> Optional[bytes]:
 
     person_found = bool(results and results.pose_landmarks)
 
-    # ── TEMP DEBUG (remove once confirmed fixed) ───────────────────
-    # Prints whether MediaPipe found ANY person at all, vs. the
-    # exercise-specific joint-visibility gate below. If person_found
-    # is always False, it's a MediaPipe/lighting/framing issue.
-    # If person_found is True but detected ends up False, it's the
-    # _relevant_landmarks_visible() joint-visibility gate — meaning
-    # the joints THIS exercise needs aren't in frame / visible enough.
-    if not person_found:
-        print("MJPEG DEBUG: MediaPipe found NO person in frame")
-    # ────────────────────────────────────────────────────────────
-
     # "detected" now means "the joints THIS exercise needs are
     # visible" rather than "MediaPipe found some person somewhere
     # in frame" — so an Elbow exercise no longer needs the
@@ -554,17 +600,15 @@ def _process_frame_locked(ctx: UserContext, frame) -> Optional[bytes]:
         results.pose_landmarks.landmark, active_exercise, side
     )
 
-    # ── TEMP DEBUG (remove once confirmed fixed) ───────────────────
-    if person_found:
-        print(f"MJPEG DEBUG: person_found=True, exercise={active_exercise}, detected={detected}")
-    # ────────────────────────────────────────────────────────────
-
     if person_found and mp_drawing is not None:
         # Skeleton is still drawn whenever MediaPipe found a person
         # at all, even if the exercise-relevant joints aren't all
         # visible yet — the doctor can see the patient adjusting
         # into frame instead of a blank video.
-        _draw_filtered_skeleton(frame, results.pose_landmarks.landmark, active_exercise, side)
+        if overlay:
+            _items_pose_filtered(items, results.pose_landmarks.landmark, active_exercise, side)
+        else:
+            _draw_filtered_skeleton(frame, results.pose_landmarks.landmark, active_exercise, side)
 
         lm = results.pose_landmarks.landmark
         try:
@@ -614,12 +658,7 @@ def _process_frame_locked(ctx: UserContext, frame) -> Optional[bytes]:
     ctx.pose_data["fatigue"]       = fatigue
     ctx.pose_data["primary_angle"] = primary_angle
 
-    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-    if not ok:
-        print("MJPEG: JPEG encode failed, skipping this frame")
-        return None
-
-    return buf.tobytes()
+    return _finish(frame, overlay, items)
 
 
 

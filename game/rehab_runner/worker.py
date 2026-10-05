@@ -18,7 +18,11 @@ except Exception:  # pragma: no cover
 # CONFIG — detection thresholds (unchanged from the original rehab_runner.py)
 # ----------------------------------------------------------------------------
 
-VIS_MIN = 0.5  # min landmark visibility to trust a frame
+VIS_MIN = 0.4           # min landmark visibility for the strict calibration check (was 0.5)
+PLAY_VIS_MIN = 0.3      # min visibility to keep PLAYING - the same threshold the camera pipeline uses
+                        # to track/draw a joint (was 0.5, which paused the game whenever a knee/ankle
+                        # dipped just below it)
+PERSON_GRACE_S = 1.2    # once calibrated, a landmark dropout shorter than this does NOT pause the game
 
 # All movement distances are measured in "torso lengths" (shoulder-centre ->
 # hip-centre distance measured during calibration). This makes every
@@ -175,6 +179,7 @@ class RehabRunnerEngine:
         self.body_ok = False
         self.body_h = None
         self.body_lost_since = None
+        self.last_ok_t = 0.0            # last time the body was fully tracked (for PERSON_GRACE_S)
         self.prev_t = 0.0
         self.speed_hist = deque(maxlen=60)
         self._reset_motion()
@@ -212,6 +217,7 @@ class RehabRunnerEngine:
         self.body_ok = False
         self.body_h = None
         self.body_lost_since = None
+        self.last_ok_t = 0.0
         self.prev = None
         self.prev_t = 0.0
         self.speed_hist.clear()
@@ -303,12 +309,23 @@ class RehabRunnerEngine:
         self._track_calib_loss(now)
 
         if person == "ok":
+            self.last_ok_t = now
             try:
                 self._handle_frame(landmarks, world_landmarks, now)
             except Exception as exc:
                 print(f"[RehabRunnerEngine] frame skipped: {exc}")
 
-        self._update_message(person, checks)
+        # A single frame (or a fraction of a second) where MediaPipe loses a knee/ankle or
+        # returns no pose is normal, especially on a slower server. Once calibrated, report
+        # such a dropout as "ok" for PERSON_GRACE_S: the engine just keeps its last state
+        # (nothing is processed for that frame), instead of the page pausing the game behind a
+        # "Step back into frame" overlay that flickers on and off.
+        shown = person
+        if person != "ok" and self.last_ok_t and now - self.last_ok_t <= PERSON_GRACE_S:
+            with self.lock:
+                if self.status["calibrated"]:
+                    shown = "ok"
+        self._update_message(shown, checks)
 
     def _update_message(self, person, checks):
         with self.lock:
@@ -362,7 +379,7 @@ class RehabRunnerEngine:
         L = mp.solutions.pose.PoseLandmark
         need = [L.LEFT_SHOULDER, L.RIGHT_SHOULDER, L.LEFT_HIP, L.RIGHT_HIP,
                 L.LEFT_KNEE, L.RIGHT_KNEE, L.LEFT_ANKLE, L.RIGHT_ANKLE]
-        return all(lm[i.value].visibility >= VIS_MIN for i in need)
+        return all(lm[i.value].visibility >= PLAY_VIS_MIN for i in need)
 
     def _check_body(self, lm):
         """Strict full-body check used by the calibration screen: head,

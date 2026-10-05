@@ -66,16 +66,15 @@ templates.env.filters["tojson"] = lambda obj: _json.dumps(obj)
 #
 # min_detection_confidence / min_tracking_confidence 0.3 (was 0.5) so
 # low-light / overexposed webcam frames still register a person;
-# model_complexity 1 (was 0) for better accuracy, smooth_landmarks on to reduce
-# jitter. If the server CPU is struggling with many users, set
-# model_complexity back to 0 in create_pose().
+# model_complexity comes from POSE_MODEL_COMPLEXITY in .env (default 0 = fastest,
+# 1 = more accurate but about 2x slower on CPU), smooth_landmarks on to reduce jitter.
 try:
     _mp_pose = mp.solutions.pose
     mp_drawing        = mp.solutions.drawing_utils
     mp_drawing_styles = mp.solutions.drawing_styles
     POSE_CONNECTIONS  = _mp_pose.POSE_CONNECTIONS
     MEDIAPIPE_READY   = True
-    print("MediaPipe Pose available (per-user instances, complexity=1, conf=0.3)")
+    print("MediaPipe Pose available (per-user instances, conf=0.3)")
 except Exception as exc:
     print(f"MediaPipe init failed: {exc}")
     _mp_pose = mp_drawing = mp_drawing_styles = POSE_CONNECTIONS = None
@@ -90,6 +89,14 @@ except Exception as exc:
     _mp_hands = HAND_CONNECTIONS = None
 
 
+def _pose_complexity() -> int:
+    try:
+        v = int((os.getenv("POSE_MODEL_COMPLEXITY") or "0").strip())
+    except ValueError:
+        v = 0
+    return v if v in (0, 1, 2) else 0
+
+
 def create_pose():
     """A NEW MediaPipe Pose tracker (one per user), or None if MediaPipe isn't usable."""
     if _mp_pose is None:
@@ -97,7 +104,7 @@ def create_pose():
     try:
         return _mp_pose.Pose(
             static_image_mode=False,
-            model_complexity=1,
+            model_complexity=_pose_complexity(),
             smooth_landmarks=True,
             min_detection_confidence=0.3,
             min_tracking_confidence=0.3,

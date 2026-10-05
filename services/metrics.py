@@ -13,6 +13,7 @@ are still plain module-level functions.
 import threading
 import collections
 import statistics
+import time
 from typing import Dict, Optional
 
 
@@ -129,6 +130,12 @@ def compute_grip_angle(finger_angles: Dict[str, float]) -> Optional[float]:
     return sum(vals) / len(vals) if vals else None
 
 
+# Stability / balance look at the last second of movement and smoothness is measured per
+# 1/30 s, so the scores no longer depend on how many frames per second the server manages.
+_WINDOW_S = 1.0
+_SMOOTH_REF_DT = 1.0 / 30.0
+
+
 class MetricsState:
     """All live metric state for ONE user's session."""
 
@@ -148,18 +155,19 @@ class MetricsState:
 
         # Stability -- hip-center landmark jitter over a rolling window
         self._stability_lock = threading.Lock()
-        self._landmark_jitter_buffer: "collections.deque" = collections.deque(maxlen=20)
+        self._landmark_jitter_buffer: "collections.deque" = collections.deque(maxlen=200)   # (t, x, y), last _WINDOW_S seconds
         self._current_stability_score = 100.0
 
         # Smoothness -- frame-to-frame angular jerk variance
         self._smoothness_lock = threading.Lock()
         self._angle_velocity_buffer: "collections.deque" = collections.deque(maxlen=15)
         self._last_primary_angle: Optional[float] = None
+        self._last_angle_t: Optional[float] = None
         self._current_smoothness_score = 100.0
 
         # Balance -- shoulder-midpoint lateral sway
         self._balance_lock = threading.Lock()
-        self._shoulder_sway_buffer: "collections.deque" = collections.deque(maxlen=20)
+        self._shoulder_sway_buffer: "collections.deque" = collections.deque(maxlen=200)   # (t, x), last _WINDOW_S seconds
         self._current_balance_score = 100.0
 
         # Fatigue -- rep-quality decline over the session
@@ -277,10 +285,14 @@ class MetricsState:
         Hand-grip exercises use the wrist landmark, because a hands-only frame has
         no hips."""
         with self._stability_lock:
-            self._landmark_jitter_buffer.append((x, y))
-            if len(self._landmark_jitter_buffer) >= 5:
-                xs = [p[0] for p in self._landmark_jitter_buffer]
-                ys = [p[1] for p in self._landmark_jitter_buffer]
+            now = time.monotonic()
+            buf = self._landmark_jitter_buffer
+            buf.append((now, x, y))
+            while buf and now - buf[0][0] > _WINDOW_S:
+                buf.popleft()
+            if len(buf) >= 5:
+                xs = [p[1] for p in buf]
+                ys = [p[2] for p in buf]
                 jitter = statistics.pstdev(xs) + statistics.pstdev(ys)
                 # jitter is in normalized [0,1] frame coords; scale empirically to 0-100
                 score = max(0.0, min(100.0, 100.0 - jitter * 4000))
@@ -292,10 +304,13 @@ class MetricsState:
             return self._current_smoothness_score
 
         with self._smoothness_lock:
-            if self._last_primary_angle is not None:
-                delta = abs(primary_angle - self._last_primary_angle)
+            now = time.monotonic()
+            if self._last_primary_angle is not None and self._last_angle_t is not None:
+                dt = min(0.5, max(0.02, now - self._last_angle_t))
+                delta = abs(primary_angle - self._last_primary_angle) * (_SMOOTH_REF_DT / dt)
                 self._angle_velocity_buffer.append(delta)
             self._last_primary_angle = primary_angle
+            self._last_angle_t = now
 
             if len(self._angle_velocity_buffer) >= 5:
                 jerk_variance = statistics.pstdev(self._angle_velocity_buffer)
@@ -312,9 +327,13 @@ class MetricsState:
             return self._current_balance_score
 
         with self._balance_lock:
-            self._shoulder_sway_buffer.append(sh_x)
-            if len(self._shoulder_sway_buffer) >= 5:
-                sway = statistics.pstdev(self._shoulder_sway_buffer)
+            now = time.monotonic()
+            buf = self._shoulder_sway_buffer
+            buf.append((now, sh_x))
+            while buf and now - buf[0][0] > _WINDOW_S:
+                buf.popleft()
+            if len(buf) >= 5:
+                sway = statistics.pstdev([p[1] for p in buf])
                 # normalized [0,1] frame coords; scale empirically to 0-100
                 score = max(0.0, min(100.0, 100.0 - sway * 5000))
                 self._current_balance_score = round(score, 1)
@@ -369,6 +388,7 @@ class MetricsState:
         with self._smoothness_lock:
             self._angle_velocity_buffer.clear()
             self._last_primary_angle = None
+            self._last_angle_t = None
             self._current_smoothness_score = 100.0
         with self._balance_lock:
             self._shoulder_sway_buffer.clear()

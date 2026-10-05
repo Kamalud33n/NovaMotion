@@ -97,8 +97,8 @@
                             <i class="fas fa-expand" id="gameFullscreenIcon"></i>
                         </button>
 
-                        <!--  MJPEG stream — browser decodes natively, no canvas/JS drawing needed -->
-                        <img id="poseStream" alt="Live pose stream" style="display:none">
+                        <!-- Live local camera + skeleton overlay, drawn by session.js -->
+                        <canvas id="poseStream" aria-label="Live pose stream" style="display:none"></canvas>
 
                         <!-- Game render surface (Rehab Runner etc.) — shown instead of the raw
                              pose stream while a game is being played; poseStream keeps running
