@@ -450,6 +450,27 @@ def _mjpeg_release_camera(ctx: Optional[UserContext] = None):
         ctx.reset_pose_data()
 
 
+def _focus_key(ctx: UserContext):
+    g = ctx.game
+    if g.get_mode() == "game":
+        return ("game", g.get_active_game_id())
+    return ("exercise", ctx.metrics.get_exercise_state()[0])
+
+
+def _focus_filter(ctx: UserContext, results, frame_shape):
+    key = _focus_key(ctx)
+    if ctx.focus_key != key:
+        ctx.focus_key = key
+        ctx.focus.relock()
+
+    landmarks = results.pose_landmarks.landmark if results and results.pose_landmarks else None
+    decision = ctx.focus.update(landmarks, frame_shape, time.time())
+    if decision.reset_tracker:
+        ctx.reset_pose_tracker()
+    ctx.pose_data["focus"] = decision.state
+    return results if decision.accept else None
+
+
 def process_frame(ctx: UserContext, frame, overlay: bool = False):
     """Run the full pose / game pipeline on ONE BGR frame (as delivered by a
     camera) and return the annotated JPEG bytes, or None if the frame could
@@ -487,6 +508,7 @@ def _process_frame_locked(ctx: UserContext, frame, overlay: bool = False):
             print(f"MJPEG: MediaPipe processing failed (game mode): {e}")
             game_results = None
 
+        game_results = _focus_filter(ctx, game_results, frame.shape)
         game_person_found = bool(game_results and game_results.pose_landmarks)
         now = time.time()
 
@@ -515,6 +537,8 @@ def _process_frame_locked(ctx: UserContext, frame, overlay: bool = False):
 
     active_exercise, target_rom, side = m.get_exercise_state()
     hand_mode = _is_hand_exercise(active_exercise)
+    if hand_mode:
+        ctx.pose_data["focus"] = "off"
 
     angles: Dict[str, float] = {}
     primary_angle: Optional[float] = None
@@ -590,6 +614,7 @@ def _process_frame_locked(ctx: UserContext, frame, overlay: bool = False):
         print(f"MJPEG: MediaPipe processing failed: {e}")
         results = None
 
+    results = _focus_filter(ctx, results, frame.shape)
     person_found = bool(results and results.pose_landmarks)
 
     # "detected" now means "the joints THIS exercise needs are

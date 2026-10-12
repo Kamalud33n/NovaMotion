@@ -388,7 +388,7 @@
         tbody.innerHTML = sorted.map(s => {
             const type = s.is_game_session ? gameLabel(s.game_id) : s.exercise_type;
             const result = s.is_game_session
-                ? `${s.final_score ?? 0} pts · ${s.left_steps ?? 0}/${s.right_steps ?? 0} steps`
+                ? (s.game_result || `${s.final_score ?? 0} pts · ${s.left_steps ?? 0}/${s.right_steps ?? 0} steps`)
                 : `${(s.accuracy_percentage ?? 0).toFixed(1)}% acc · ${(s.average_rom ?? 0).toFixed(1)}° ROM`;
             return `
                 <tr>

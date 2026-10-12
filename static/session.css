@@ -33,6 +33,7 @@
             position: absolute;
             top: 0; left: 0;
             width: 100%; height: 100%;
+            object-fit: contain;
             display: none;
             background: #0b0b10;
         }
@@ -55,6 +56,8 @@
             padding: 3px 9px; border-radius: 6px;
         }
         .game-stage.game-active .patient-video-panel { display: block; }
+        .game-stage.no-patient-view .patient-video-panel { display: none !important; }
+        .game-stage.no-patient-view .camera-container.game-active { aspect-ratio: 16 / 10; }
         @media (max-width: 1024px) {
             .game-stage { flex-direction: column; }
             .game-stage.game-active .patient-video-panel { flex: 0 0 160px; }
@@ -89,8 +92,10 @@
         }
         .camera-container:fullscreen canvas#gameCanvas,
         .camera-container:-webkit-full-screen canvas#gameCanvas {
-            position: static; width: auto; height: auto;
-            max-width: 100vw; max-height: 100vh; object-fit: contain;
+            /* stay absolutely positioned (like normal) so it keeps painting OVER #poseStream,
+               which is absolute too -- a static canvas ended up underneath it in fullscreen */
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            object-fit: contain;
         }
         .camera-container:fullscreen .game-fullscreen-btn,
         .camera-container:-webkit-full-screen .game-fullscreen-btn {
@@ -218,6 +223,34 @@
             display: none;
             z-index: 10;
             white-space: nowrap;
+        }
+
+        .focus-badge {
+            position: absolute;
+            bottom: 12px; left: 12px;
+            display: none;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 6px 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            color: #fff;
+            background: rgba(29,138,109,0.88);
+            z-index: 10;
+            white-space: nowrap;
+        }
+        .focus-badge.holding   { background: rgba(217,130,30,0.9); }
+        .focus-badge.searching { background: rgba(90,100,114,0.9); }
+        .focus-badge button {
+            border: 0;
+            border-radius: 14px;
+            padding: 3px 10px;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            color: #1B2A4A;
+            background: rgba(255,255,255,0.92);
         }
 
         /* ── Duration selector ── */

@@ -1,21 +1,8 @@
 """
 Registry of available games for the session page's "Game" mode dropdown.
-
-To add a new game later:
-  1. Create game/<your_game>/ with an engine class (see rehab_runner/worker.py
-     for the shape: reset(), request_calibration(), process_frame(lm, world,
-     now, frame_shape), get_status(), get_summary()).
-  2. Add one entry to GAMES below, including "target_metric": the key inside
-     that engine's get_status() dict which counts toward the therapist's
-     "target steps/reps" goal (services/game_state.py reads this generically
-     to decide when a session should auto-finish — no other file changes).
-  3. Add one entry to EXTRA_VIS_JOINTS below only if the calibration/status
-     screen should insist on extra body parts beyond the default (head,
-     shoulders, hip, knees, feet) that every engine already checks.
-That's it — the session-page dropdown and the camera-loop wiring both read
-this dict, so no other file needs to change to add a game.
 """
 from game.rehab_runner.worker import RehabRunnerEngine
+from game.balloon_pop.worker import BalloonPopEngine
 
 GAMES = {
     "rehab_runner": {
@@ -25,6 +12,17 @@ GAMES = {
         # eng.get_status()["steps"] is what "Target Steps" / auto-finish
         # is measured against for this game.
         "target_metric": "steps",
+        "target_label": "Target Steps",
+        "target_default": 30,
+    },
+    "balloon_pop": {
+        "label": "Balloon Pop",
+        "description": "Shoulder rehab - raise your arm to the side or forward to touch and pop the balloons.",
+        "engine_cls": BalloonPopEngine,
+        # eng.get_status()["reps"] = balloons popped so far.
+        "target_metric": "reps",
+        "target_label": "Target Reps",
+        "target_default": 10,
     },
 }
 
@@ -35,9 +33,18 @@ def get_game(game_id: str):
 
 
 def list_games():
-    """[{id, label, description}, ...] — for the session page's game dropdown."""
+    """[{id, label, description, target_label, target_default, config_schema}, ...]
+    for the session page's game dropdown. config_schema comes from the engine
+    class (config_schema() staticmethod); games without options report []."""
     return [
-        {"id": gid, "label": g["label"], "description": g["description"]}
+        {
+            "id": gid,
+            "label": g["label"],
+            "description": g["description"],
+            "target_label": g.get("target_label", "Target Steps"),
+            "target_default": g.get("target_default", 0),
+            "config_schema": getattr(g["engine_cls"], "config_schema", lambda: [])(),
+        }
         for gid, g in GAMES.items()
     ]
 

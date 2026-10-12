@@ -1,19 +1,4 @@
 """
-Per-user game-mode state for the session page's camera pipeline. Mirrors
-services/metrics.py's role for "Exercise" mode, but for the "Game" section:
-holds which mode the session page is in, which game is selected, that
-game's live engine instance, and the therapist-configured target (target
-steps / customizable duration) so mjpeg_camera.py can dispatch frames to
-the engine and the session page can poll one place for "is this game
-session finished yet".
-
-Everything lives on a GameState instance (one per logged-in user, see
-services/user_context.py), so two doctors playing at the same time never
-share a game engine, calibration, or timer.
-
-Not tied to any one game -- new games only ever get added to game/registry.py;
-nothing here needs to change (each game just declares its own
-"target_metric" in the registry -- see registry.py).
 """
 import threading
 import time
@@ -100,6 +85,19 @@ class GameState:
             self._reset_target_locked()
             self._target_steps = target_steps
             self._duration_seconds = duration_seconds
+
+    def configure_game(self, cfg: dict) -> bool:
+        """Pass game-specific choices (e.g. Balloon Pop's arm / movement) to
+        the active engine. Call after select_game(), before request_calibration().
+        Returns False if there is no engine or it takes no configuration
+        (Rehab Runner), True once applied. Generic: any engine that defines
+        configure(dict) gets it, nothing here is tied to one game."""
+        eng = self.get_engine()
+        fn = getattr(eng, "configure", None)
+        if fn is None:
+            return False
+        fn(cfg or {})
+        return True
 
     def reset_game(self):
         """Call right before a game session (re)starts, so calibration/step/lane

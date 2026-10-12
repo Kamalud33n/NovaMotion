@@ -8,7 +8,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="/static/chart.umd.min.js"></script>
-    <link rel="stylesheet" href="/static/session.css?v=1">
+    <link rel="stylesheet" href="/static/session.css?v=3">
 </head>
 <body>
 <div class="app-container">
@@ -256,6 +256,8 @@
                             <div class="game-description" id="gameDescription"></div>
                         </div>
 
+                        <div id="gameOptions"></div>
+
                         <!-- Duration selector (reuses exercise mode's pattern) -->
                         <div class="form-group">
                             <label>Session Duration</label>
@@ -272,7 +274,7 @@
                         </div>
 
                         <div class="form-group">
-                            <label>Target Steps</label>
+                            <label id="gameTargetLabel">Target Steps</label>
                             <input type="number" id="targetSteps" class="form-input" value="30" min="0" max="500" placeholder="0 = no target">
                         </div>
                     </div>
@@ -335,26 +337,7 @@
 
                     <!-- Game analytics fields -->
                     <div id="gameAnalyticsFields" style="display:none">
-                        <div class="analytics-grid">
-                            <div class="analytics-card">
-                                <span class="analytics-label">Steps</span>
-                                <span class="analytics-value" id="gameStepsDisplay">0 / 0</span>
-                                <div class="progress-bar"><div class="progress-fill" id="gameStepsProgress" style="width:0%"></div></div>
-                            </div>
-                            <div class="analytics-card">
-                                <span class="analytics-label">Lane Position</span>
-                                <span class="analytics-value" id="gameLaneDisplay">Center</span>
-                            </div>
-                            <div class="analytics-card">
-                                <span class="analytics-label">Crouch</span>
-                                <span class="analytics-value" id="gameCrouchDisplay">No</span>
-                            </div>
-                            <div class="analytics-card">
-                                <span class="analytics-label">Calibration</span>
-                                <span class="analytics-value" id="gameCalibDisplay">Not started</span>
-                                <div class="progress-bar"><div class="progress-fill" id="gameCalibProgress" style="width:0%"></div></div>
-                            </div>
-                        </div>
+                        <div class="analytics-grid" id="gameHudGrid"></div>
 
                         <div class="feedback-display" id="gameFeedbackDisplay">
                             <div class="feedback-message">
@@ -419,7 +402,11 @@
     </div>
 </div>
 
-<script src="/static/session.js?v=2" defer></script>
+<script src="/static/games/core.js?v=4" defer></script>
+<script src="/static/games/options.js?v=2" defer></script>
+<script src="/static/games/runner.js?v=2" defer></script>
+<script src="/static/games/balloon.js?v=6" defer></script>
+<script src="/static/session.js?v=5" defer></script>
 
 
 </body>

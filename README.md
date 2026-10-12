@@ -1,4 +1,4 @@
-# NovaMotion — In-Clinic Rehabilitation AI System
+# Thero — In-Clinic Rehabilitation AI System
 
 FastAPI-based in-clinic platform for physiotherapy rehab tracking: webcam +
 MediaPipe pose sessions, patient records, recovery analytics, PDF reports,
@@ -58,7 +58,6 @@ thero/
 ├── Dockerfile / docker-compose.yml
 │
 ├── assign_owner.py            # one-off: assign legacy (owner-less) patients to a user
-├── chaneg.py                  # one-off: copy an old SQLite DB into MySQL
 ├── check.py                   # one-off: inspect/reset the admin user directly in MySQL
 │
 ├── routers/
@@ -70,8 +69,7 @@ thero/
 │   ├── export.py               # MedNova integration: signed export API (EXPORT_API_KEY)
 │   ├── auth/                   # login, forgot/reset password, profile
 │   │   ├── login.py, forgot_password.py, reset_password.py, profile.py
-│   │   ├── _common.py          # shared field-cleaning helpers
-│   │   └── register.py         # ⚠ legacy/unused — replaced by registration_otp/ (see below)
+│   │   └── _common.py          # shared field-cleaning helpers
 │   └── admin/                  # everything admin-only
 │       ├── pages.py            # /admin, /admin/users, /admin/approvals, /admin/tickets, /admin/settings
 │       ├── dashboard.py, users.py, approvals.py, tickets.py
@@ -110,21 +108,15 @@ thero/
 │
 ├── static/                      # app.js / style.css (shared), admin/ and auth/ (page-specific), chart.umd.min.js
 ├── assets/                       # logo + marketing/screenshot images
-├── uploads/ / reports/ / data/   # runtime-written: patient photos, generated PDFs, rehab.db (dev SQLite)
+├── uploads/ / reports/ / data/   # runtime-written: patient photos, generated PDFs
 └── .env                          # not committed — see README-ENV-SETUP.md
 ```
 
 ### A few things worth knowing before you touch the code
 
-- **`routers/auth/register.py` is dead code.** Registration was moved to
-  `registration_otp/` (OTP-gated) and `routers/auth/__init__.py` no longer
-  includes it. Safe to delete once you've confirmed nothing else imports it.
-- **`assign_owner.py`, `chaneg.py`, `check.py`** are one-off ops scripts, not
+- **`assign_owner.py` and `check.py`** are one-off ops scripts, not
   part of the running app — run manually from the project root when needed
   (each has a docstring with usage at the top).
-- **`data/rehab.db`** is a leftover/dev SQLite file — the app itself talks to
-  MySQL only (`database.py`). `chaneg.py` exists specifically to migrate an
-  old SQLite file like this into MySQL.
 - **Camera runs in the browser.** `static/session.js` opens the camera with
   `getUserMedia` (external USB webcam preferred, built-in laptop camera as
   fallback), sends JPEG frames to `/ws/camera` and shows the annotated frame
@@ -214,7 +206,6 @@ python assign_owner.py you@clinic.com --yes   # hand them all to one account
 python check.py                               # inspect users table
 python check.py --reset "NewPass123"          # force-reset/create the admin
 
-python chaneg.py old_rehab.db                 # migrate an old SQLite DB into MySQL
 ```
 
 ## 7. API notes

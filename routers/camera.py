@@ -1,8 +1,5 @@
 """
-In-clinic camera router. /video_feed serves the MJPEG stream from the webcam
-attached to THIS machine (services/mjpeg_camera.py -> cv2.VideoCapture(0)),
-which is the only capture path in this build: the server runs on the
-clinic desktop next to the camera.
+In-clinic camera router.
 """
 import json
 from typing import Dict, Any
@@ -98,7 +95,7 @@ async def camera_ws(websocket: WebSocket):
                     status = ctx.game.get_game_status()
                     if status.get("active_game") is not None:
                         await websocket.send_text(
-                            json.dumps({"type": "game", "status": status}, default=float))
+                            json.dumps({"type": "game", "status": status, "focus": ctx.focus.state}, default=float))
                 except Exception as e:      # never lose the frame over a status problem
                     print(f"WS camera: game status failed: {e}")
             else:
@@ -193,6 +190,7 @@ def _reset_session_state(ctx: UserContext):
         ctx.pose_data["balance"]       = 100.0
         ctx.pose_data["fatigue"]       = 0.0
         ctx.pose_data["primary_angle"] = None
+        ctx.reset_focus()
 
 
 @router.post("/api/session/reset")
@@ -201,6 +199,19 @@ async def api_session_reset(ctx: UserContext = Depends(user_ctx)):
     buffer don't carry over stale data from a previous session/patient."""
     await run_in_threadpool(_reset_session_state, ctx)   # lock may wait for an in-flight frame
     return JSONResponse({"success": True, "seq": ctx.pose_data.get("seq", 0)})
+
+
+def _relock_focus(ctx: UserContext):
+    with ctx.process_lock:
+        ctx.reset_pose_tracker()
+        ctx.reset_focus()
+
+
+@router.post("/api/focus/relock")
+async def api_focus_relock(ctx: UserContext = Depends(user_ctx)):
+    """Doctor pressed Re-lock: forget the current patient and lock on again."""
+    await run_in_threadpool(_relock_focus, ctx)
+    return JSONResponse({"success": True, "focus": ctx.pose_data.get("focus")})
 
 
 @router.get("/api/camera/status")
@@ -262,6 +273,18 @@ async def api_game_target(payload: Dict[str, Any], ctx: UserContext = Depends(us
         duration_seconds=payload.get("duration_seconds"),
     )
     return JSONResponse({"success": True})
+
+
+@router.post("/api/game/config")
+async def api_game_config(payload: Dict[str, Any], ctx: UserContext = Depends(user_ctx)):
+    """Game-specific options for the selected game (Balloon Pop: arm =
+    left/right/both_alt, mode = abd/flex/mixed). Call after /api/game/select
+    and before /api/game/calibrate. Games without options just report
+    applied=False."""
+    if ctx.game.get_engine() is None:
+        raise HTTPException(400, "Select a game first")
+    applied = ctx.game.configure_game(payload)
+    return JSONResponse({"success": True, "applied": applied})
 
 
 @router.post("/api/game/calibrate")

@@ -34,6 +34,7 @@ from game.registry import get_game
 from services.helpers import (
     calculate_recovery_score, calculate_improvement, split_sessions,
     is_game_session, game_steps, game_left_steps, game_right_steps, game_final_score,
+    game_id_of, is_balloon_session, balloon_stats,
 )
 
 
@@ -330,6 +331,291 @@ def _footer_block(st: dict) -> list:
     ]
 
 
+# ── Balloon Pop sections ─────────────────────────────────────────────────
+# Balloon Pop is a shoulder-rehab game (reps / angles), so it gets its own
+# report sections instead of the Rehab Runner "steps / score / lives" ones.
+_FINISH_LABEL = {"target": "Target reached", "time": "Time up", "manual": "Stopped early"}
+_B_ARM     = {"left": "Left", "right": "Right"}
+_B_PLANE   = {"abd": "Abduction", "flex": "Flexion"}
+def _make_balloon_chart(sessions: list):
+    """Pop rate (%) and average pop time (s) over the last 10 Balloon Pop
+    sessions. Returns None when there is nothing worth plotting (fewer than 2
+    sessions, or no session with miss data so pop rate is unknown)."""
+    plot = sessions[-10:]
+    if len(plot) < 2:
+        return None
+    nan = float("nan")
+    rates, times = [], []
+    for s in plot:
+        b = balloon_stats(s)
+        judged = b["reps"] + (b["misses"] or 0)
+        rates.append(b["reps"] / judged * 100 if b["misses"] is not None and judged else nan)
+        times.append(b["avg_time_to_pop"] if b["reps"] else nan)
+    if all(r != r for r in rates):             # NaN != NaN -> no pop rate anywhere
+        return None
+    idx   = list(range(1, len(plot) + 1))
+    dates = [s.start_time.strftime("%m/%d") for s in plot]
+
+    fig, ax1 = plt.subplots(figsize=(6.5, 2.3), dpi=150)
+    fig.patch.set_facecolor("white")
+    ax1.set_facecolor("white")
+    ax1.plot(idx, rates, color="#1B2A4A", linewidth=2, marker="o", markersize=4, label="Pop rate %")
+    ax2 = ax1.twinx()
+    ax2.plot(idx, times, color="#8B93A1", linewidth=1.6, linestyle="--", marker="s",
+             markersize=3.5, label="Avg pop time (s)")
+
+    ax1.set_xticks(idx)
+    ax1.set_xticklabels(dates, fontsize=7, color="#5A6472")
+    ax1.tick_params(axis="y", labelsize=7, colors="#5A6472")
+    ax2.tick_params(axis="y", labelsize=7, colors="#5A6472")
+    ax1.set_ylim(0, 100)
+    ax2.set_ylim(bottom=0)
+    for ax in (ax1, ax2):
+        ax.spines["top"].set_visible(False)
+    ax1.spines["left"].set_color("#B7BEC9")
+    ax1.spines["bottom"].set_color("#B7BEC9")
+    ax2.spines["right"].set_color("#B7BEC9")
+    ax1.grid(axis="y", color="#EEF1F5", linewidth=1)
+
+    l1, n1 = ax1.get_legend_handles_labels()
+    l2, n2 = ax2.get_legend_handles_labels()
+    ax1.legend(l1 + l2, n1 + n2, loc="upper left", fontsize=7, frameon=False, ncol=2,
+               bbox_to_anchor=(0, 1.22))
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", facecolor="white")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+_B_LEVEL   = {0: "Low", 1: "Mid", 2: "High"}
+_B_ARMCFG  = {"left": "Left arm", "right": "Right arm", "both_alt": "Both (alternate)"}
+_B_MODECFG = {"abd": "Abduction (side)", "flex": "Flexion (forward)", "mixed": "Mixed"}
+_B_ORDER   = {0: "Random", 1: "Low to high", 2: "High to low"}
+_B_EVENT_ROWS_MAX = 40
+
+
+def _fmt_deg(v) -> str:
+    return f"{float(v):.1f}°" if v not in (None, "") else "—"
+
+
+def _balloon_period_blocks(sessions: list, st: dict, doc_width: float = None) -> list:
+    """Summary + progress chart + history table for every Balloon Pop session
+    in a period report."""
+    if not sessions:
+        return []
+    pairs = [(s, balloon_stats(s)) for s in sessions]
+    reps = sum(b["reps"] for _, b in pairs)
+    known = [(s, b) for s, b in pairs if b["misses"] is not None]
+    misses = sum(b["misses"] for _, b in known)
+    judged = sum(b["reps"] + b["misses"] for _, b in known)
+    pop_rate = f"{sum(b['reps'] for _, b in known) / judged * 100:.1f}%" if judged else "—"
+    avg_pop = (sum(b["avg_time_to_pop"] * b["reps"] for _, b in pairs) / reps) if reps else 0.0
+    max_elev = max((b["max_elevation"] for _, b in pairs), default=0.0)
+    targets_met = sum(1 for s, _ in pairs if (s.session_data or {}).get("finish_reason") == "target")
+
+    story = [
+        st["section_header"]("Balloon Pop Summary"),
+        Spacer(1, 12),
+        st["metric_row"]([
+            ("Balloon Sessions", str(len(pairs))),
+            ("Balloons Popped",  str(reps)),
+            ("Targets Met",      f"{targets_met}/{len(pairs)}"),
+        ]),
+        Spacer(1, 8),
+        st["metric_row"]([
+            ("Missed",        str(misses) if known else "—"),
+            ("Pop Rate",      pop_rate),
+            ("Avg Pop Time",  f"{avg_pop:.1f}s" if reps else "—"),
+        ]),
+        Spacer(1, 8),
+        st["metric_row"]([
+            ("Max Elevation",      _fmt_deg(max_elev) if reps else "—"),
+            ("Left / Right Pops",  f"{sum(b['left_reps'] for _, b in pairs)} / {sum(b['right_reps'] for _, b in pairs)}"),
+            ("Trunk Lean Events",  str(sum(b["lean_events"] for _, b in pairs))),
+        ]),
+        Spacer(1, 10),
+    ]
+    if len(known) < len(pairs):
+        story += [
+            Paragraph("Note: sessions saved before this update have no miss data; "
+                      "missed / pop-rate figures cover the sessions that do.", st["body"]),
+            Spacer(1, 6),
+        ]
+    story.append(Spacer(1, 12))
+
+    chart_buf = _make_balloon_chart(sessions) if doc_width else None
+    if chart_buf is not None:
+        story += [
+            st["section_header"]("Balloon Pop Progress"), Spacer(1, 10),
+            RLImage(chart_buf, width=doc_width, height=doc_width * 0.34),
+            Spacer(1, 18),
+        ]
+
+    story += [st["section_header"]("Balloon Pop History (Last 10)"), Spacer(1, 10)]
+    rows = []
+    for s, b in pairs[-10:]:
+        sd = s.session_data or {}
+        target = b["target_reps"]
+        reason = sd.get("finish_reason") or "—"
+        rows.append([
+            Paragraph(s.id[:8], st["table_cell"]),
+            Paragraph(s.start_time.strftime("%Y-%m-%d"), st["table_cell"]),
+            Paragraph(f"{b['reps']}/{target}" if target else str(b["reps"]), st["table_cell"]),
+            Paragraph(str(b["misses"]) if b["misses"] is not None else "—", st["table_cell"]),
+            Paragraph(f"{b['avg_time_to_pop']:.1f}s" if b["reps"] else "—", st["table_cell"]),
+            Paragraph(_fmt_deg(b["max_elevation"]) if b["reps"] else "—", st["table_cell"]),
+            Paragraph(f"{b['left_reps']} / {b['right_reps']}", st["table_cell"]),
+            Paragraph(str(b["lean_events"]), st["table_cell"]),
+            Paragraph(f"{s.duration_seconds}s" if s.duration_seconds else "—", st["table_cell"]),
+            Paragraph(_FINISH_LABEL.get(reason, reason), st["table_cell"]),
+        ])
+    story += [
+        st["data_table"](
+            ["Session", "Date", "Popped", "Missed", "Avg Pop", "Max Elev.", "L / R", "Lean", "Duration", "Result"],
+            rows,
+            [0.10, 0.11, 0.10, 0.08, 0.09, 0.11, 0.09, 0.07, 0.10, 0.15],
+        ),
+        Spacer(1, 24),
+    ]
+    return story
+
+
+def _balloon_session_blocks(s: SessionModel, st: dict) -> list:
+    """Full detail for one Balloon Pop round: overview, per-plane and per-arm
+    results, calibration, the settings used, and every balloon popped."""
+    sd = s.session_data or {}
+    b = balloon_stats(s)
+    cfg = b["settings"]
+    reason = sd.get("finish_reason") or "—"
+    target = b["target_reps"]
+    judged = (b["reps"] + b["misses"]) if b["misses"] is not None else 0
+    pop_rate = f"{b['reps'] / judged * 100:.1f}%" if judged else "—"
+
+    story = [
+        st["metric_row"]([
+            ("Game",     "Balloon Pop"),
+            ("Duration", f"{s.duration_seconds}s" if s.duration_seconds else "—"),
+            ("Result",   _FINISH_LABEL.get(reason, reason)),
+        ]),
+        Spacer(1, 8),
+        st["metric_row"]([
+            ("Balloons Popped", f"{b['reps']}/{target}" if target else str(b["reps"])),
+            ("Missed",          str(b["misses"]) if b["misses"] is not None else "—"),
+            ("Pop Rate",        pop_rate),
+        ]),
+        Spacer(1, 8),
+        st["metric_row"]([
+            ("Avg Time to Pop",    f"{b['avg_time_to_pop']:.1f}s" if b["reps"] else "—"),
+            ("Max Elevation",      _fmt_deg(b["max_elevation"]) if b["reps"] else "—"),
+            ("Trunk Lean Events",  str(b["lean_events"])),
+        ]),
+        Spacer(1, 8),
+        st["metric_row"]([
+            ("Arm",        _B_ARMCFG.get(cfg.get("arm"), "—")),
+            ("Movement",   _B_MODECFG.get(cfg.get("mode"), "—")),
+            ("Left / Right Pops", f"{b['left_reps']} / {b['right_reps']}"),
+        ]),
+        Spacer(1, 22),
+    ]
+    if not b["complete"]:
+        story += [
+            Paragraph("Note: this session was saved before miss / calibration / settings data was recorded; "
+                      "figures shown are rebuilt from the per-balloon log.", st["body"]),
+            Spacer(1, 14),
+        ]
+
+    # Per movement plane
+    rows = []
+    for p in ("abd", "flex"):
+        v = b["by_plane"].get(p) or {}
+        if v.get("reps", 0) > 0:
+            rows.append([
+                Paragraph(_B_PLANE[p], st["table_cell"]),
+                Paragraph(str(v.get("reps", 0)), st["table_cell"]),
+                Paragraph(_fmt_deg(v.get("peak")), st["table_cell"]),
+            ])
+    if rows:
+        story += [
+            st["section_header"]("Results by Movement"), Spacer(1, 10),
+            st["data_table"](["Movement", "Balloons Popped", "Peak Angle"], rows, [0.40, 0.30, 0.30]),
+            Spacer(1, 22),
+        ]
+
+    # Per arm + plane, with the calibrated maximum
+    keys = list(dict.fromkeys(list(b["by_arm_plane"].keys()) + list(b["calibration"].keys())))
+    rows = []
+    for k in keys:
+        side, _, plane = k.partition("_")
+        v = b["by_arm_plane"].get(k) or {}
+        cal = v.get("calibrated_max") if v.get("calibrated_max") is not None else b["calibration"].get(k)
+        peak = v.get("peak")
+        pct = f"{peak / cal * 100:.0f}%" if (cal and peak) else "—"
+        rows.append([
+            Paragraph(f"{_B_ARM.get(side, side)} · {_B_PLANE.get(plane, plane)}", st["table_cell"]),
+            Paragraph(str(v.get("reps", 0)), st["table_cell"]),
+            Paragraph(_fmt_deg(peak) if peak else "—", st["table_cell"]),
+            Paragraph(_fmt_deg(cal) if cal else "—", st["table_cell"]),
+            Paragraph(pct, st["table_cell"]),
+        ])
+    if rows:
+        story += [
+            st["section_header"]("Arm & Calibration"), Spacer(1, 10),
+            st["data_table"](["Arm · Movement", "Popped", "Peak Angle", "Calibrated Max", "% of Max Reached"],
+                             rows, [0.28, 0.14, 0.18, 0.20, 0.20]),
+            Spacer(1, 22),
+        ]
+
+    # Settings used for this round
+    if cfg:
+        def _row(label, value):
+            return [Paragraph(label, st["table_cell"]), Paragraph(str(value), st["table_cell"])]
+        lean = cfg.get("lean")
+        rows = [
+            _row("Balloon heights (low / mid / high, % of max)",
+                 f"{cfg.get('lvl_low', '—')} / {cfg.get('lvl_mid', '—')} / {cfg.get('lvl_high', '—')}"),
+            _row("Height order", _B_ORDER.get(cfg.get("order"), "—")),
+            _row("Balloon size", f"{cfg.get('size', '—')}%"),
+            _row("Distance from shoulder", f"{cfg.get('reach', '—')}%"),
+            _row("Touch time needed to pop", f"{cfg.get('dwell', '—')} ms"),
+            _row("Time before a balloon counts as missed", f"{cfg.get('timeout', '—')} s"),
+            _row("Angle tolerance below target", f"{cfg.get('gate', '—')}°"),
+            _row("Trunk lean limit", "Off" if lean == 0 else f"{lean}°" if lean is not None else "—"),
+        ]
+        story += [
+            st["section_header"]("Settings Used"), Spacer(1, 10),
+            st["data_table"](["Setting", "Value"], rows, [0.65, 0.35]),
+            Spacer(1, 22),
+        ]
+
+    # Every balloon popped
+    events = b["events"]
+    if events:
+        rows = []
+        for e in events[:_B_EVENT_ROWS_MAX]:
+            rows.append([
+                Paragraph(str(e.get("id", "")), st["table_cell"]),
+                Paragraph(_B_ARM.get(e.get("side"), "—"), st["table_cell"]),
+                Paragraph(_B_PLANE.get(e.get("plane"), "—"), st["table_cell"]),
+                Paragraph(_B_LEVEL.get(e.get("level"), "—"), st["table_cell"]),
+                Paragraph(_fmt_deg(e.get("target")), st["table_cell"]),
+                Paragraph(_fmt_deg(e.get("peak")), st["table_cell"]),
+                Paragraph(f"{e.get('time_to_pop', 0):.1f}s", st["table_cell"]),
+                Paragraph(str(e.get("lean_events", 0)), st["table_cell"]),
+            ])
+        story += [
+            st["section_header"]("Balloon-by-Balloon Log"), Spacer(1, 10),
+            st["data_table"](["#", "Arm", "Movement", "Height", "Target", "Peak", "Time to Pop", "Lean"],
+                             rows, [0.07, 0.12, 0.17, 0.12, 0.14, 0.14, 0.14, 0.10]),
+        ]
+        if len(events) > _B_EVENT_ROWS_MAX:
+            story += [Spacer(1, 6),
+                      Paragraph(f"Showing the first {_B_EVENT_ROWS_MAX} of {len(events)} balloons.", st["body"])]
+        story.append(Spacer(1, 22))
+    return story
+
+
 def build_report_sync(
     patient_id: str,
     report_type: str,
@@ -449,41 +735,62 @@ def build_report_sync(
         # Patient info — clean two-column key/value grid, no fills
         story += _patient_info_block(p, st, doc.width)
 
-        # Summary metrics — bordered boxes
-        story += [
-            st["section_header"]("Summary Metrics"),
-            Spacer(1, 12),
-            st["metric_row"]([
-                ("Total Sessions", str(n)),
-                ("Avg Accuracy",   f"{avg_acc:.1f}%"),
-                ("Avg ROM",        f"{avg_rom:.1f}°"),
-            ]),
-            Spacer(1, 8),
-            st["metric_row"]([
-                ("Total Reps",     str(total_reps)),
-                ("Recovery Score", f"{rec_score:.1f}%"),
-                ("Improvement",    f"{improvement:+.1f}%"),
-            ]),
-            Spacer(1, 22),
-        ]
+        # Summary metrics — bordered boxes. Exercise-quality numbers (accuracy / ROM /
+        # recovery) only mean something for exercise sessions, so a games-only
+        # report shows play totals instead of a wall of 0s.
+        if exercise_sessions:
+            story += [
+                st["section_header"]("Summary Metrics"),
+                Spacer(1, 12),
+                st["metric_row"]([
+                    ("Total Sessions", str(n)),
+                    ("Avg Accuracy",   f"{avg_acc:.1f}%"),
+                    ("Avg ROM",        f"{avg_rom:.1f}°"),
+                ]),
+                Spacer(1, 8),
+                st["metric_row"]([
+                    ("Total Reps",     str(total_reps)),
+                    ("Recovery Score", f"{rec_score:.1f}%"),
+                    ("Improvement",    f"{improvement:+.1f}%"),
+                ]),
+                Spacer(1, 22),
+            ]
+
+        else:
+            play_secs = sum(x.duration_seconds or 0 for x in sessions)
+            story += [
+                st["section_header"]("Summary Metrics"),
+                Spacer(1, 12),
+                st["metric_row"]([
+                    ("Total Sessions",  str(len(sessions))),
+                    ("Games Played",    str(len({game_id_of(x) for x in sessions}))),
+                    ("Total Play Time", f"{play_secs // 60}m {play_secs % 60:02d}s"),
+                ]),
+                Spacer(1, 22),
+            ]
 
         # Game session summary — only shown if this patient has any (Rehab
         # Runner etc., services/game_state.py). Steps/target completion
         # instead of ROM/reps, since those don't apply to game sessions.
-        if game_sessions:
-            total_steps = sum(game_steps(s) for s in game_sessions)
-            total_left_steps = sum(game_left_steps(s) for s in game_sessions)
-            total_right_steps = sum(game_right_steps(s) for s in game_sessions)
-            total_score = sum(game_final_score(s) for s in game_sessions)
-            targets_met = sum(1 for s in game_sessions if (s.session_data or {}).get("finish_reason") == "target")
+        # Each game reports its own metrics: Balloon Pop gets reps/angle sections,
+        # every other (step-driven) game keeps the steps/score sections.
+        balloon_sessions = [x for x in game_sessions if is_balloon_session(x)]
+        step_sessions    = [x for x in game_sessions if not is_balloon_session(x)]
+
+        if step_sessions:
+            total_steps = sum(game_steps(s) for s in step_sessions)
+            total_left_steps = sum(game_left_steps(s) for s in step_sessions)
+            total_right_steps = sum(game_right_steps(s) for s in step_sessions)
+            total_score = sum(game_final_score(s) for s in step_sessions)
+            targets_met = sum(1 for s in step_sessions if (s.session_data or {}).get("finish_reason") == "target")
 
             story += [
                 st["section_header"]("Game Session Summary"),
                 Spacer(1, 12),
                 st["metric_row"]([
-                    ("Game Sessions",  str(len(game_sessions))),
+                    ("Game Sessions",  str(len(step_sessions))),
                     ("Total Steps",    str(total_steps)),
-                    ("Targets Met",    f"{targets_met}/{len(game_sessions)}"),
+                    ("Targets Met",    f"{targets_met}/{len(step_sessions)}"),
                 ]),
                 Spacer(1, 8),
                 st["metric_row"]([
@@ -534,11 +841,11 @@ def build_report_sync(
             ]
 
         # Game session history — separate table (steps/target instead of ROM/reps)
-        if game_sessions:
+        if step_sessions:
             story += [st["section_header"]("Game Session History (Last 10)"), Spacer(1, 10)]
 
             rows = []
-            for s in game_sessions[-10:]:
+            for s in step_sessions[-10:]:
                 sd = s.session_data or {}
                 target = sd.get("target_steps")
                 reason = sd.get("finish_reason") or "—"
@@ -563,6 +870,9 @@ def build_report_sync(
                 ),
                 Spacer(1, 24),
             ]
+
+        # Balloon Pop — reps / angle based sections
+        story += _balloon_period_blocks(balloon_sessions, st, doc.width)
 
         # AI Recommendations — rule-based, exercise metrics only; skipped
         # for a game-only report since accuracy/ROM/stability are 0 there
@@ -635,7 +945,9 @@ def build_session_report_sync(patient_id: str, session_id: str) -> str:
         story += _patient_info_block(p, st, doc.width)
 
         story += [st["section_header"]("Session Overview"), Spacer(1, 12)]
-        if is_game:
+        if is_game and is_balloon_session(s):
+            story += _balloon_session_blocks(s, st)
+        elif is_game:
             target = sd.get("target_steps")
             reason = sd.get("finish_reason") or "—"
             result = {"target": "Target reached", "time": "Time up", "manual": "Stopped early"}.get(reason, reason)

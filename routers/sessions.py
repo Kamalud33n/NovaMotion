@@ -8,6 +8,7 @@ from database import get_db
 from models import SessionModel, JointAngle, ExerciseResult, History
 from services.auth.deps import CurrentUser, require_clinical
 from services.ownership import get_owned_patient
+from services.helpers import game_result_line
 
 router = APIRouter()
 
@@ -54,6 +55,7 @@ async def get_sessions(patient_id: str, me: CurrentUser = Depends(require_clinic
                 "final_score":         sd.get("final_score"),
                 "lives_remaining":     sd.get("lives_remaining"),
                 "finish_reason":       sd.get("finish_reason"),
+                "game_result":         game_result_line(s),   # per-game one-liner for the reports list
                 "joint_angles": [
                     {"joint_name": ja.joint_name, "angle": ja.angle_value,
                      "target": ja.target_angle, "is_correct": ja.is_correct}

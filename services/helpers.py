@@ -34,6 +34,10 @@ def game_steps(s: SessionModel) -> int:
     """Steps recorded for a game session (0 for a non-game session)."""
     if not is_game_session(s):
         return 0
+    # Balloon Pop's completed_reps are balloons popped, not steps — keep
+    # them out of every "total steps" figure (dashboard, analytics, patients).
+    if is_balloon_session(s):
+        return 0
     return (s.session_data or {}).get("steps") or s.completed_reps or 0
 
 
@@ -119,5 +123,93 @@ def session_summary(s: SessionModel) -> dict:
         "incorrect_movements": s.incorrect_movements,
         "date":                s.start_time.strftime("%Y-%m-%d %H:%M"),
         "is_game_session":     is_game_session(s),
-        "steps":               game_steps(s) if is_game_session(s) else None,
+        "game_id":             game_id_of(s),
+        "game_result":         game_result_line(s),   # "" for exercise sessions
+        "steps":               game_steps(s) if is_game_session(s) and not is_balloon_session(s) else None,
     }
+
+# ── Per-game helpers ─────────────────────────────────────────────────────
+# Each game stores its own metrics under session_data (see the game's
+# buildSession() in static/games/*.js). Reports and the sessions API read
+# them through these helpers so nothing outside this file needs to know
+# one game's session_data shape.
+BALLOON_GAME_ID = "balloon_pop"
+
+
+def game_id_of(s: SessionModel):
+    """game_id stored on a game session (None for exercise sessions)."""
+    return (s.session_data or {}).get("game_id") if is_game_session(s) else None
+
+
+def is_balloon_session(s: SessionModel) -> bool:
+    return game_id_of(s) == BALLOON_GAME_ID
+
+
+def balloon_stats(s: SessionModel) -> dict:
+    """Normalised Balloon Pop metrics for one session.
+
+    Uses the summary fields saved at session end. Sessions saved before
+    those fields existed only have the per-balloon `events` log, so reps,
+    avg pop time, peak angle, L/R and plane totals are recomputed from it;
+    misses / calibration / settings can't be recovered and come back as
+    None / {} (`complete` is False for those)."""
+    sd = s.session_data or {}
+    events = sd.get("events") or []
+
+    def _mean(vals):
+        return round(sum(vals) / len(vals), 2) if vals else 0.0
+
+    reps = sd.get("reps")
+    if reps is None:
+        reps = len(events) or (s.completed_reps or 0)
+
+    by_plane = sd.get("by_plane")
+    if not by_plane:
+        by_plane = {}
+        for p in ("abd", "flex"):
+            pr = [e for e in events if e.get("plane") == p]
+            by_plane[p] = {"reps": len(pr), "peak": max([e.get("peak", 0) for e in pr], default=0.0)}
+
+    by_arm_plane = sd.get("by_arm_plane")
+    if not by_arm_plane:
+        by_arm_plane = {}
+        for e in events:
+            k = f"{e.get('side')}_{e.get('plane')}"
+            b = by_arm_plane.setdefault(k, {"reps": 0, "peak": 0.0, "calibrated_max": None})
+            b["reps"] += 1
+            b["peak"] = max(b["peak"], e.get("peak", 0) or 0)
+
+    return {
+        "reps": reps,
+        "misses": sd.get("misses"),
+        "lean_events": sd["lean_events"] if sd.get("lean_events") is not None
+                       else sum(e.get("lean_events", 0) or 0 for e in events),
+        "avg_time_to_pop": sd["avg_time_to_pop"] if sd.get("avg_time_to_pop") is not None
+                           else _mean([e.get("time_to_pop", 0) or 0 for e in events]),
+        "max_elevation": sd["max_elevation"] if sd.get("max_elevation") is not None
+                         else max([e.get("peak", 0) or 0 for e in events], default=0.0),
+        "left_reps": sd["left_reps"] if sd.get("left_reps") is not None
+                     else sum(1 for e in events if e.get("side") == "left"),
+        "right_reps": sd["right_reps"] if sd.get("right_reps") is not None
+                      else sum(1 for e in events if e.get("side") == "right"),
+        "by_plane": by_plane,
+        "by_arm_plane": by_arm_plane,
+        "calibration": sd.get("calibration") or {},
+        "settings": sd.get("settings") or {},
+        "events": events,
+        "target_reps": sd.get("target_steps"),
+        "complete": sd.get("misses") is not None,
+    }
+
+
+def game_result_line(s: SessionModel) -> str:
+    """One-line, game-appropriate result for session lists (reports page)."""
+    if not is_game_session(s):
+        return ""
+    if is_balloon_session(s):
+        b = balloon_stats(s)
+        line = f"{b['reps']} popped"
+        if b["misses"] is not None:
+            line += f" · {b['misses']} missed"
+        return line
+    return f"{game_final_score(s)} pts · {game_left_steps(s)}/{game_right_steps(s)} steps"

@@ -9,6 +9,7 @@ from models import SessionModel
 from services.auth.deps import CurrentUser, require_clinical
 from services.helpers import calculate_recovery_score, session_summary, split_sessions, game_steps
 from services.ownership import get_owned_patient, owned_sessions
+from services.progress import build_progress
 
 router = APIRouter()
 
@@ -89,3 +90,23 @@ async def analytics(patient_id: Optional[str] = None, me: CurrentUser = Depends(
             "today_sessions":     [session_summary(s) for s in today_bucket],
             "yesterday_sessions": [session_summary(s) for s in yesterday_bucket],
         })
+
+
+@router.get("/api/analytics/progress/{patient_id}")
+async def patient_progress(patient_id: str, me: CurrentUser = Depends(require_clinical)):
+    """One patient's progress over time, per exercise and per game (see
+    services/progress.py): a series for charting plus first-vs-latest change
+    for each metric. Scoped to the caller's own patients like every other
+    clinical route."""
+    with get_db() as db:
+        patient = get_owned_patient(db, patient_id, me)
+        sessions = (
+            db.query(SessionModel)
+            .filter(SessionModel.patient_id == patient_id)
+            .order_by(SessionModel.start_time)
+            .all()
+        )
+        result = build_progress(sessions)
+        result["patient"] = {"id": patient.id, "name": patient.name}
+        result["total_sessions"] = len(sessions)
+        return JSONResponse(result)

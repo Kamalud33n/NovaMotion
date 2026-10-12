@@ -84,6 +84,20 @@
             padding: 8px 10px; text-align: left; border-bottom: 1px solid rgba(0,0,0,0.06);
         }
         .session-mini-table th { color: var(--text-light); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+        /* Patient Progress */
+        .prog-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+        .prog-chip {
+            border: 1px solid rgba(0,0,0,0.12); background: transparent; color: var(--text-secondary);
+            padding: 6px 12px; border-radius: 999px; font-size: 13px; font-weight: 500; cursor: pointer;
+            font-family: inherit;
+        }
+        .prog-chip:hover { border-color: #1D8A6D; }
+        .prog-chip.active { background: #1D8A6D; border-color: #1D8A6D; color: #fff; }
+        .prog-chip small { opacity: .75; margin-left: 4px; }
+        .prog-note { font-size: 13px; color: var(--text-light); margin: 0 0 14px; }
+        .prog-note.warn { color: #a8782e; }
+        .compare-card.clickable { cursor: pointer; }
+        .compare-card.selected { outline: 2px solid #1D8A6D; }
     </style>
 </head>
 <body>
@@ -171,6 +185,16 @@
                     </div>
                 </div>
 
+                <!-- Patient progress (per exercise / per game, first vs latest session) -->
+                <div class="chart-container glass-effect animate-slide-up" id="progressCard">
+                    <div class="chart-header">
+                        <h3>Patient Progress</h3>
+                    </div>
+                    <div id="progressBody">
+                        <div class="no-data-msg"><i class="fas fa-user"></i><span>Select a patient above to see their progress</span></div>
+                    </div>
+                </div>
+
                 <!-- Today's sessions -->
                 <div class="report-history glass-effect animate-slide-up">
                     <div class="section-header">
@@ -237,6 +261,7 @@
     async function loadAnalytics() {
         const pid = document.getElementById('analyticsPatientSelect').value;
         const url = pid ? `/api/analytics?patient_id=${pid}` : '/api/analytics';
+        loadProgress(pid);   // independent of the today-vs-yesterday request
 
         document.getElementById('compareGrid').innerHTML =
             '<div class="no-data-msg" style="grid-column:1/-1"><i class="fas fa-spinner fa-spin"></i><span>Loading...</span></div>';
@@ -339,21 +364,160 @@
         });
     }
 
+    // ---------------------------------------------------------------------
+    // Patient Progress: per exercise / per game, from /api/analytics/progress
+    // ---------------------------------------------------------------------
+    let _progChart = null;
+    let _prog = { groups: [], gi: 0, metric: null };
+
+    function escHtml(s) {
+        return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    function progMessage(icon, text) {
+        if (_progChart) { _progChart.destroy(); _progChart = null; }
+        document.getElementById('progressBody').innerHTML =
+            `<div class="no-data-msg"><i class="fas ${icon}"></i><span>${text}</span></div>`;
+    }
+
+    async function loadProgress(pid) {
+        if (!pid) { progMessage('fa-user', 'Select a patient above to see their progress'); return; }
+        progMessage('fa-spinner fa-spin', 'Loading progress...');
+        try {
+            const res = await fetch(`/api/analytics/progress/${encodeURIComponent(pid)}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            // A newer patient selection may have been made while this was in flight.
+            if (document.getElementById('analyticsPatientSelect').value !== pid) return;
+
+            const groups = [...(data.exercises || []), ...(data.games || [])];
+            if (!groups.length) { progMessage('fa-chart-line', 'No sessions recorded for this patient yet'); return; }
+
+            // open on the first group that already has 2+ sessions
+            let gi = groups.findIndex(g => g.enough_data);
+            if (gi < 0) gi = 0;
+            _prog = { groups, gi, metric: null };
+            renderProgress();
+        } catch (e) {
+            console.error('loadProgress:', e);
+            progMessage('fa-exclamation-circle', 'Failed to load progress');
+        }
+    }
+
+    function selectProgGroup(i) { _prog.gi = i; _prog.metric = null; renderProgress(); }
+    function selectProgMetric(k) { _prog.metric = k; renderProgress(); }
+
+    function fmtVal(v, unit) { return v == null ? '—' : `${+(+v).toFixed(1)}${unit || ''}`; }
+
+    function renderProgress() {
+        const g = _prog.groups[_prog.gi];
+        const metric = _prog.metric || (g.metrics[0] && g.metrics[0].key);
+        _prog.metric = metric;
+
+        const tabs = _prog.groups.map((x, i) => `
+            <button class="prog-chip ${i === _prog.gi ? 'active' : ''}" onclick="selectProgGroup(${i})">
+                <i class="fas ${x.kind === 'game' ? 'fa-gamepad' : 'fa-dumbbell'}"></i>
+                ${escHtml(x.label)}<small>${x.sessions}</small>
+            </button>`).join('');
+
+        const fmtD = iso => (iso || '').slice(0, 10);
+        const range = g.sessions > 1
+            ? `${g.sessions} sessions · ${fmtD(g.first_date)} → ${fmtD(g.latest_date)}`
+            : `1 session · ${fmtD(g.first_date)}`;
+        const note = g.enough_data
+            ? `<p class="prog-note">${range}. Change compares the first and the latest session.</p>`
+            : `<p class="prog-note warn">${range}. Need at least 2 sessions to show improvement.</p>`;
+
+        const cards = g.metrics.filter(m => g.change[m.key]).map(m => {
+            const c = g.change[m.key];
+            let cls = 'delta-flat', icon = 'fa-minus', text = 'No change';
+            if (c.delta !== 0) {
+                cls  = c.improved ? 'delta-up' : 'delta-down';
+                icon = c.delta > 0 ? 'fa-arrow-up' : 'fa-arrow-down';
+                const amount = c.pct != null ? `${c.pct > 0 ? '+' : ''}${c.pct}%` : `${c.delta > 0 ? '+' : ''}${fmtVal(c.delta, c.unit)}`;
+                text = `${amount} · ${c.improved ? 'improved' : 'declined'}`;
+            }
+            return `
+            <div class="compare-card clickable glass-effect ${m.key === metric ? 'selected' : ''}" onclick="selectProgMetric('${m.key}')">
+                <div class="metric-label">${escHtml(m.label)}</div>
+                <div class="metric-row">
+                    <span class="metric-today">${fmtVal(c.latest, c.unit)}</span>
+                    <span class="metric-yesterday">first: ${fmtVal(c.first, c.unit)}</span>
+                </div>
+                <div class="delta-pill ${cls}"><i class="fas ${icon}"></i>${text}</div>
+            </div>`;
+        }).join('');
+
+        const metricChips = g.metrics.map(m => `
+            <button class="prog-chip ${m.key === metric ? 'active' : ''}" onclick="selectProgMetric('${m.key}')">${escHtml(m.label)}</button>`).join('');
+
+        document.getElementById('progressBody').innerHTML = `
+            <div class="prog-chips">${tabs}</div>
+            ${note}
+            ${cards ? `<div class="compare-grid">${cards}</div>` : ''}
+            <div class="prog-chips">${metricChips}</div>
+            <div class="canvas-wrapper-lg"><canvas id="progressChart"></canvas></div>`;
+
+        drawProgressChart(g, metric);
+    }
+
+    function drawProgressChart(g, metricKey) {
+        const m = g.metrics.find(x => x.key === metricKey);
+        if (!m) return;
+        if (_progChart) { _progChart.destroy(); _progChart = null; }
+
+        const labels = g.series.map(p => p.date.slice(5, 10));
+        const values = g.series.map(p => p.metrics[metricKey]);
+        const isPct  = m.unit === '%';
+
+        _progChart = new Chart(document.getElementById('progressChart').getContext('2d'), {
+            type: 'line',
+            data: { labels, datasets: [{
+                label: m.label + (m.unit ? ` (${m.unit})` : ''),
+                data: values, spanGaps: true,
+                borderColor: '#1D8A6D', backgroundColor: 'rgba(29,138,109,0.1)',
+                tension: 0.3, fill: true, borderWidth: 2, pointRadius: 4,
+            }] },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: true, position: 'top', labels: { usePointStyle: true, pointStyle: 'circle', font: { size: 12 } } },
+                    tooltip: { callbacks: { title: items => g.series[items[0].dataIndex].date.replace('T', ' ').slice(0, 16) } },
+                },
+                scales: {
+                    y: { beginAtZero: true, ...(isPct ? { max: 100 } : {}), grid: { color: 'rgba(0,0,0,0.04)' } },
+                    x: { grid: { display: false } },
+                },
+                interaction: { intersect: false, mode: 'index' },
+            },
+        });
+    }
+
     function renderSessionsTable(tbodyId, sessions) {
         const tbody = document.getElementById(tbodyId);
         if (!sessions.length) {
             tbody.innerHTML = '<tr><td colspan="6" class="text-center">No sessions</td></tr>';
             return;
         }
-        tbody.innerHTML = sessions.map(s => `
+        // Game sessions don't record ROM / stability (stored as 0 by design),
+        // so show "—" there instead of a misleading 0, and put the game's own
+        // one-line result under the name. Accuracy for a game = its success
+        // rate (Balloon Pop: pop rate).
+        const num = (v, d = 1) => (v != null && v.toFixed) ? v.toFixed(d) : (v ?? 0);
+        tbody.innerHTML = sessions.map(s => {
+            const g = !!s.is_game_session;
+            const sub = g && s.game_result
+                ? `<div style="font-size:11px;color:var(--text-secondary)">${s.game_result}</div>` : '';
+            return `
             <tr>
                 <td>${(s.date || '').split(' ')[1] || s.date}</td>
-                <td>${s.exercise_type}</td>
-                <td>${(s.accuracy ?? 0).toFixed ? s.accuracy.toFixed(1) : s.accuracy}%</td>
-                <td>${(s.rom ?? 0).toFixed ? s.rom.toFixed(1) : s.rom}°</td>
-                <td>${s.stability != null ? s.stability.toFixed(1) : '—'}%</td>
+                <td>${s.exercise_type}${sub}</td>
+                <td>${num(s.accuracy)}%</td>
+                <td>${g ? '—' : num(s.rom) + '°'}</td>
+                <td>${g ? '—' : num(s.stability) + '%'}</td>
                 <td>${s.completed_reps}</td>
-            </tr>`).join('');
+            </tr>`;
+        }).join('');
     }
 
     function handleLogout() {

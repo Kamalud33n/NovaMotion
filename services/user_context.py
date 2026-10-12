@@ -26,6 +26,7 @@ from typing import Any, Dict, Optional
 import config
 from services.metrics import MetricsState
 from services.game_state import GameState
+from services.focus_lock import FocusLock
 
 # A context nobody has touched for this long (and with no camera socket open)
 # is dropped to free its MediaPipe models. 30 min keeps the state alive long
@@ -40,6 +41,7 @@ def new_pose_data() -> Dict[str, Any]:
         "detected": False, "angles": {}, "ts": None,
         "reps": 0, "stability": 100.0, "primary_angle": None,
         "smoothness": 100.0, "balance": 100.0, "fatigue": 0.0,
+        "focus": "searching",
     }
 
 
@@ -49,6 +51,8 @@ class UserContext:
         self.metrics = MetricsState()
         self.game = GameState()
         self.pose_data: Dict[str, Any] = new_pose_data()
+        self.focus = FocusLock()
+        self.focus_key = None
 
         # process_frame() for this user runs one frame at a time (MediaPipe
         # trackers + metrics are stateful); other users run in parallel.
@@ -79,10 +83,17 @@ class UserContext:
         if self.remote_clients == 0:
             self.pose_data["detected"] = False
             self.pose_data["angles"] = {}
+            self.reset_focus()
 
     def reset_pose_data(self):
         self.pose_data["detected"] = False
         self.pose_data["angles"] = {}
+        self.reset_focus()
+
+    def reset_focus(self):
+        self.focus.relock()
+        self.focus_key = None
+        self.pose_data["focus"] = self.focus.state
 
     # -- MediaPipe trackers (created on first use, one set per user) ----------
     @property
@@ -92,6 +103,16 @@ class UserContext:
                 self._pose = config.create_pose()
                 self._pose_made = True
             return self._pose
+
+    def reset_pose_tracker(self):
+        with self._models_lock:
+            try:
+                if self._pose is not None:
+                    self._pose.close()
+            except Exception:
+                pass
+            self._pose = None
+            self._pose_made = False
 
     @property
     def hands(self):
