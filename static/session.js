@@ -114,9 +114,9 @@ function toggleCamera() {
 
 const CAM_MAX_W = 640;            // frames are downscaled to this width before sending (exercise mode)
 const CAM_JPEG_QUALITY = 0.7;
-const CAM_EX_MAX_W = 512;         // exercise mode (body pose): lighter than before, MediaPipe resizes internally anyway
+const CAM_EX_MAX_W = 384;         // exercise mode (body pose): MediaPipe resizes internally anyway, smaller = faster upload/decode
 const CAM_EX_JPEG_QUALITY = 0.65; // (hand grip / finger exercises keep CAM_MAX_W / CAM_JPEG_QUALITY: small joints need the pixels)
-const CAM_GAME_MAX_W = 480;       // game mode: lighter frames -> faster upload + less MediaPipe/decode work on the server
+const CAM_GAME_MAX_W = 384;       // game mode: lighter frames -> faster upload + less MediaPipe/decode work on the server
 const CAM_GAME_JPEG_QUALITY = 0.6;
 const CAM_MIN_INTERVAL_MS = 50;   // cap at ~20 fps
 const CAM_MAX_INFLIGHT = 2;       // frames sent but not answered yet (overlaps upload + server work)

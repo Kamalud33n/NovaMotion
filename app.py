@@ -166,4 +166,7 @@ if __name__ == "__main__":
     import uvicorn
     # Keep this a SINGLE process (no `workers=`): each doctor's live session state
     # (services/user_context.py) is held in this process's memory.
-    uvicorn.run(app, host=app_settings.host, port=app_settings.port, reload=False)
+    # ws_per_message_deflate=False: /ws/camera carries JPEG frames, which are already
+    # compressed. Compressing them again only burns CPU and adds delay per frame.
+    uvicorn.run(app, host=app_settings.host, port=app_settings.port, reload=False,
+                ws_per_message_deflate=False)
