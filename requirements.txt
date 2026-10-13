@@ -3,9 +3,12 @@ uvicorn[standard]
 python-multipart
 sqlalchemy
 opencv-python
-# PIN THIS to the version you developed with (`pip show mediapipe`).
-# Newer mediapipe releases removed `mp.solutions`, which this app uses for Pose/Hands.
-mediapipe
+# PINNED on purpose. Newer mediapipe releases removed `mp.solutions`, which this app
+# uses for Pose/Hands (verified: 1.1.0 has no mp.solutions). Unpinned, `pip install` on
+# python:3.10-slim resolves to 1.1.0 and pose tracking silently never detects anyone.
+# 0.10.21 has mp.solutions and a cp310 wheel for Debian. If you change this version,
+# test Pose + Hands before deploying.
+mediapipe==0.10.21
 numpy
 pandas
 reportlab
