@@ -122,13 +122,30 @@ const CAM_MIN_INTERVAL_MS = 50;   // cap at ~20 fps
 const CAM_MAX_INFLIGHT = 2;       // frames sent but not answered yet (overlaps upload + server work)
 const CAM_DRAW_MAX_AGE_MS = 700;  // hide a skeleton older than this (no ghost skeleton if replies stop)
 const CAM_STALL_MS = 4000;        // no reply for this long -> the frame/reply was lost, send a fresh one
+// Skeleton smoothing + latency compensation. The skeleton comes back from the server a few
+// hundred ms after the frame it describes, while the video is drawn live, so it trails fast
+// movements. We (1) smooth it with a One-Euro filter (steady when still, low lag when moving)
+// and (2) push it forward along its own velocity by roughly the age of the frame.
+const SK_MIN_CUTOFF   = 0.7;    // Hz; lower = steadier when the patient is still
+const SK_BETA         = 10.0;   // higher = less lag during fast movement
+const SK_D_CUTOFF     = 5.0;    // Hz; smoothing of the velocity estimate
+const SK_LEAD_FACTOR  = 0.85;   // share of the frame's age to compensate for
+const SK_LEAD_MAX_S   = 0.35;   // never predict further ahead than this
+const SK_MAX_OFFSET   = 0.15;   // max predicted shift per coordinate (fraction of the frame)
+const SK_VEL_DEADZONE = 0.08;   // units/s below which we do not extrapolate (kills jitter)
+const SK_SNAP_DIST    = 0.30;   // a joint jumping further than this = different skeleton, no blending
+const SK_VIEW_TAU_S   = 0.035;  // on-screen easing between render frames
 // Labels of built-in laptop cameras; anything else is treated as an external USB webcam.
 const INTERNAL_CAM_RE = /integrated|built-?in|internal|facetime|laptop|front/i;
 
 let camStream = null, camWs = null, camVideo = null, camCanvas = null, camCtx = null;
 let camPrevUrl = null, camLastSend = 0, camSendTimer = null;
 let camInFlight = 0, camWatchdog = null;   // frames sent but not answered yet / stall timer
-let camEncoding = false, camRaf = null, camDraw = null, camDrawAt = 0;
+let camEncoding = false, camRaf = null;
+let camSentAt = [];                          // capture time of every frame still waiting for its reply
+let camStats = { n: 0, sum: 0, max: 0, t0: 0 };   // round-trip time log (console, every 5 s)
+let skX = null, skDX = null, skShown = null;       // filtered skeleton, its velocity, what is on screen
+let skN = { l: 0, d: 0 }, skSentAt = 0, skArrive = 0, skLastRender = 0;
 
 function cameraErrorMessage(e) {
     if (!window.isSecureContext) return 'Camera needs HTTPS. Open this site with https:// (or localhost).';
@@ -190,6 +207,7 @@ function camSendFrame() {
     const w = Math.min(maxW, camVideo.videoWidth);
     const h = Math.round(w * camVideo.videoHeight / camVideo.videoWidth);
     if (camCanvas.width !== w || camCanvas.height !== h) { camCanvas.width = w; camCanvas.height = h; }
+    const capturedAt = performance.now();
     camCtx.drawImage(camVideo, 0, 0, w, h);
     camEncoding = true;
     camCanvas.toBlob(blob => {
@@ -197,6 +215,7 @@ function camSendFrame() {
         if (!cameraActive || !camWs || camWs.readyState !== WebSocket.OPEN) return;
         if (blob) {
             camLastSend = performance.now();
+            camSentAt.push(capturedAt);
             camInFlight++;
             camArmWatchdog();
             camWs.send(blob);
@@ -216,6 +235,7 @@ function camArmWatchdog() {
         if (!cameraActive || !camWs || camWs.readyState !== WebSocket.OPEN) return;
         console.warn('camera stream stalled - sending a fresh frame');
         camInFlight = 0;
+        camSentAt.length = 0;
         if (camSendTimer) { clearTimeout(camSendTimer); camSendTimer = null; }
         camSendFrame();
     }, CAM_STALL_MS);
@@ -223,6 +243,17 @@ function camArmWatchdog() {
 
 // The server answered one frame (annotated image, or an error for it).
 function camReplyReceived() {
+    const sentAt = camSentAt.shift();
+    if (sentAt !== undefined) {
+        const now = performance.now(), rtt = now - sentAt;
+        if (!camStats.t0) camStats.t0 = now;
+        camStats.n++; camStats.sum += rtt; camStats.max = Math.max(camStats.max, rtt);
+        if (now - camStats.t0 >= 5000) {
+            console.info(`[cam] ${(camStats.n / ((now - camStats.t0) / 1000)).toFixed(1)} replies/s, ` +
+                         `frame-to-skeleton delay avg ${Math.round(camStats.sum / camStats.n)} ms, max ${Math.round(camStats.max)} ms`);
+            camStats = { n: 0, sum: 0, max: 0, t0: now };
+        }
+    }
     camInFlight = Math.max(0, camInFlight - 1);
     clearTimeout(camWatchdog);
     camWatchdog = null;
@@ -248,6 +279,65 @@ function camScheduleNext() {
     camSendTimer = setTimeout(camSendFrame, wait);
 }
 
+function skAlpha(cutoff, dt) {
+    const tau = 1 / (2 * Math.PI * cutoff);
+    return 1 / (1 + tau / dt);
+}
+
+// A new skeleton arrived from the server for the frame captured at `capturedAt`.
+function camSkelUpdate(msg, capturedAt) {
+    const nl = msg.l.length, nd = msg.d.length, n = nl * 4 + nd * 2;
+    const raw = new Float64Array(n);
+    let i = 0;
+    for (const l of msg.l) { raw[i++] = l[0]; raw[i++] = l[1]; raw[i++] = l[2]; raw[i++] = l[3]; }
+    for (const d of msg.d) { raw[i++] = d[0]; raw[i++] = d[1]; }
+
+    // Blend only if it is the same set of joints as last time and nothing jumped.
+    let same = skX && skN.l === nl && skN.d === nd;
+    if (same) {
+        for (let k = 0; k < n; k++) {
+            if (Math.abs(raw[k] - skX[k]) > SK_SNAP_DIST) { same = false; break; }
+        }
+    }
+    if (!same) {
+        skX = raw;
+        skDX = new Float64Array(n);
+        skShown = null;                               // snap on screen too
+    } else {
+        const dt = Math.min(0.5, Math.max(0.01, (capturedAt - skSentAt) / 1000));
+        const aD = skAlpha(SK_D_CUTOFF, dt);
+        for (let k = 0; k < n; k++) {
+            const dx  = (raw[k] - skX[k]) / dt;
+            const edx = skDX[k] + aD * (dx - skDX[k]);
+            const cutoff = SK_MIN_CUTOFF + SK_BETA * Math.abs(edx);
+            skX[k] += skAlpha(cutoff, dt) * (raw[k] - skX[k]);
+            skDX[k] = edx;
+        }
+    }
+    skN = { l: nl, d: nd };
+    skSentAt = capturedAt;
+    skArrive = performance.now();
+}
+
+// The skeleton to draw right now (filtered, moved forward by the frame's age, eased), or null.
+function camSkelFrame(now) {
+    if (!skX || now - skArrive > CAM_DRAW_MAX_AGE_MS) return null;
+    const n = skX.length;
+    let snap = false;
+    if (!skShown || skShown.length !== n) { skShown = new Float64Array(n); snap = true; }
+    const dtFrame = skLastRender ? Math.min(0.1, (now - skLastRender) / 1000) : 0.016;
+    skLastRender = now;
+    const k = snap ? 1 : 1 - Math.exp(-dtFrame / SK_VIEW_TAU_S);
+    const lead = Math.min(SK_LEAD_FACTOR * Math.max(0, now - skSentAt) / 1000, SK_LEAD_MAX_S);
+    for (let i = 0; i < n; i++) {
+        let v = skDX[i];
+        v = Math.abs(v) < SK_VEL_DEADZONE ? 0 : v - Math.sign(v) * SK_VEL_DEADZONE;
+        const off = Math.max(-SK_MAX_OFFSET, Math.min(SK_MAX_OFFSET, v * lead));
+        skShown[i] += (skX[i] + off - skShown[i]) * k;
+    }
+    return skShown;
+}
+
 // Draws the live local video (mirrored, like the server's frame) and the latest skeleton.
 function camRenderLoop() {
     camRaf = requestAnimationFrame(camRenderLoop);
@@ -262,23 +352,25 @@ function camRenderLoop() {
     c.scale(-1, 1);
     c.drawImage(camVideo, 0, 0, w, h);
     c.restore();
-    if (!camDraw || performance.now() - camDrawAt > CAM_DRAW_MAX_AGE_MS) return;
+    const sk = camSkelFrame(performance.now());
+    if (!sk) return;
     c.lineWidth = Math.max(2, w / 320);
     c.strokeStyle = '#00a0ff';
     c.lineCap = 'round';
     c.beginPath();
-    for (const l of camDraw.l) {
-        c.moveTo(l[0] * w, l[1] * h);
-        c.lineTo(l[2] * w, l[3] * h);
+    let i = 0;
+    for (let n = 0; n < skN.l; n++, i += 4) {
+        c.moveTo(sk[i] * w, sk[i + 1] * h);
+        c.lineTo(sk[i + 2] * w, sk[i + 3] * h);
     }
     c.stroke();
     const rad = Math.max(3, w / 200);
     c.fillStyle = '#78e600';
     c.strokeStyle = '#ffffff';
     c.lineWidth = 1;
-    for (const d of camDraw.d) {
+    for (let n = 0; n < skN.d; n++, i += 2) {
         c.beginPath();
-        c.arc(d[0] * w, d[1] * h, rad, 0, 6.2832);
+        c.arc(sk[i] * w, sk[i + 1] * h, rad, 0, 6.2832);
         c.fill();
         c.stroke();
     }
@@ -286,7 +378,11 @@ function camRenderLoop() {
 
 function camCleanup() {
     if (camRaf) { cancelAnimationFrame(camRaf); camRaf = null; }
-    camDraw = null;
+    skX = skDX = skShown = null;
+    skN = { l: 0, d: 0 };
+    skLastRender = 0;
+    camSentAt.length = 0;
+    camStats = { n: 0, sum: 0, max: 0, t0: 0 };
     camEncoding = false;
     if (camSendTimer) { clearTimeout(camSendTimer); camSendTimer = null; }
     if (camWatchdog) { clearTimeout(camWatchdog); camWatchdog = null; }
@@ -342,8 +438,7 @@ async function startCamera() {
                 return;
             }
             if (msg && msg.type === 'draw') {        // skeleton for one frame = the reply to that frame
-                camDraw = msg;
-                camDrawAt = performance.now();
+                camSkelUpdate(msg, camSentAt.length ? camSentAt[0] : performance.now());
                 countFrameForFps();
                 camReplyReceived();
                 return;

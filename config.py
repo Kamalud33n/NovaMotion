@@ -67,7 +67,8 @@ templates.env.filters["tojson"] = lambda obj: _json.dumps(obj)
 # min_detection_confidence / min_tracking_confidence 0.3 (was 0.5) so
 # low-light / overexposed webcam frames still register a person;
 # model_complexity comes from POSE_MODEL_COMPLEXITY in .env (default 0 = fastest,
-# 1 = more accurate but about 2x slower on CPU), smooth_landmarks on to reduce jitter.
+# 1 = more accurate but about 2x slower on CPU), smooth_landmarks OFF to avoid extra lag
+# (the browser smooths the skeleton with a One-Euro filter in static/session.js).
 try:
     _mp_pose = mp.solutions.pose
     mp_drawing        = mp.solutions.drawing_utils
@@ -105,7 +106,7 @@ def create_pose():
         return _mp_pose.Pose(
             static_image_mode=False,
             model_complexity=_pose_complexity(),
-            smooth_landmarks=True,
+            smooth_landmarks=False,   # off: its built-in smoothing adds lag; the browser smooths the skeleton instead (static/session.js)
             min_detection_confidence=0.3,
             min_tracking_confidence=0.3,
         )
