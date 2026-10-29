@@ -17,9 +17,16 @@ let currentSmoothness = 100;   //  real — from backend frame-jerk variance
 let currentBalance    = 100;   //  real — from backend shoulder-sway variance
 let currentFatigue    = 0;     //  real — from backend rep-quality decline trend
 let repCount         = 0;
+let repDetails       = [];     // EVERY attempt in order, correct and wrong: {done, score, rom, speed, feedback}
+let liveRepRom       = null;   // highest angle of the rep that is in progress right now
+let repScores        = [];     // final score of every completed rep (scored per rep on the server)
+let liveRepScore     = null;   // score of the rep in progress; stays at its final value once that rep ends
+let repIncomplete    = 0;      // attempts that fell back to rest without reaching the target
+let goalReachedAt    = 0;      // performance.now() when the target rep count was reached (the last rep gets a moment to finish)
 let repsSyncReady    = false;   // true once /api/session/reset has landed, so stale reps from the previous session can't auto-stop this one
 let resetDoneAt      = 0;       // Date.now() when /api/session/reset last completed; polls SENT before this carry old-session data
 let lastPollApplied  = 0;       // send-time of the newest /api/pose_data response applied (drops out-of-order responses)
+let currentRecordingId = null;   // keypoint recording of the running session (server returns it from reset / calibrate)
 let resetSeq         = 0;       // server session counter returned by /api/session/reset; pose data with a lower seq is from an older session
 let lastPoseWsAt     = 0;       // performance.now() of the newest pose data pushed over the camera WebSocket
 let lastPoseApplyAt  = -1e9;    // when the page last ran handlePoseData for a pushed message (throttle)
@@ -692,12 +699,25 @@ function handlePoseData(data, fresh = true) {
     document.getElementById('detectionStatus').style.color  = poseDetected ? '#1D8A6D' : '#D9503E';
     if (sessionActive && repsSyncReady && fresh && data.reps != null) {
         repCount = data.reps;
+        // Per-rep scores come straight from the server (see MetricsState.get_rep_scoring)
+        if (Array.isArray(data.rep_scores)) repScores = data.rep_scores;
+        if (Array.isArray(data.rep_details)) repDetails = data.rep_details;
+        liveRepRom = data.rep_live_rom != null ? data.rep_live_rom : null;
+        liveRepScore  = data.rep_live != null ? data.rep_live : null;
+        repIncomplete = data.rep_incomplete || 0;
+        renderRepScores();
         const repGoal = parseInt(document.getElementById('targetReps').value);
         if (sessionMode === 'exercise' && repGoal > 0 && repCount >= repGoal) {
-            updateAnalytics(data.primary_angle, parseInt(document.getElementById('targetRom').value) || 90);
-            showToast('🎯 Target reps completed! Session ending...', 'success');
-            stopSession();
-            return;
+            // A rep is counted the moment it reaches the target but is only scored once the
+            // arm comes back down, so give the last rep a moment to finish before ending.
+            if (!goalReachedAt) goalReachedAt = performance.now();
+            const lastRepScored = repScores.length >= repGoal;
+            if (lastRepScored || performance.now() - goalReachedAt > 4000) {
+                updateAnalytics(data.primary_angle, parseInt(document.getElementById('targetRom').value) || 90);
+                showToast('🎯 Target reps completed! Session ending...', 'success');
+                stopSession();
+                return;
+            }
         }
     }
     if (!poseDetected) return;
@@ -833,14 +853,32 @@ function startSession() {
     currentBalance    = 100;
     currentFatigue    = 0;
     _timeline = [];
+    repScores = []; repDetails = [];
+    liveRepScore = null;
+    repIncomplete = 0;
+    goalReachedAt = 0; window._overtimeToastShown = false;
+    renderRepScores();
 
     // Reset server-side rep counter + stability buffer for this new
     // session, and make sure backend has the latest exercise/ROM target
     repsSyncReady = false;
+    currentRecordingId = null;
     syncExerciseType();
-    fetch('/api/session/reset', { method: 'POST' })
+    fetch('/api/session/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            patient_id:    document.getElementById('sessionPatientSelect').value,
+            exercise_type: document.getElementById('exerciseType').value,
+            target_rom:    parseFloat(document.getElementById('targetRom').value) || 90,
+            side:          selectedSide,
+        }),
+    })
         .then(r => r.json())
-        .then(j => { if (j && j.seq != null) resetSeq = j.seq; })   // pose data older than this belongs to the previous session
+        .then(j => {
+            if (j && j.seq != null) resetSeq = j.seq;
+            currentRecordingId = (j && j.recording_id) || null;
+        })   // pose data older than this belongs to the previous session
         .catch(e => console.error('session reset failed:', e))
         // Polls are tagged with their send time (see pollPoseData); only polls
         // sent after this moment are trusted for rep counting, so a fixed delay
@@ -880,8 +918,19 @@ function startSession() {
         else arc.style.stroke = '#1D8A6D';
 
         if (countdownLeft <= 0) {
-            showToast('⏰ Time up! Session ending...', 'success');
-            stopSession();
+            const goal = parseInt(document.getElementById('targetReps').value);
+            if (sessionMode === 'exercise' && goal > 0 && repCount < goal) {
+                // Not enough correct reps yet: keep the session running (timer parked at 00:00)
+                // until the target is reached, or the user presses Stop.
+                countdownLeft = 0;
+                if (!window._overtimeToastShown) {
+                    window._overtimeToastShown = true;
+                    showToast(`⏱ Time is over, but only ${repCount}/${goal} correct reps done — keep going!`, 'info', 5000);
+                }
+            } else {
+                showToast('⏰ Time up! Session ending...', 'success');
+                stopSession();
+            }
         }
     }, 1000);
 
@@ -945,14 +994,10 @@ function updateAnalytics(primaryAngle, targetRom) {
         romHist.push({ t: nowMs, v: currentRom });
         while (romHist.length && nowMs - romHist[0].t > 2500) romHist.shift();
         currentRomPeak = romHist.reduce((m, r) => Math.max(m, r.v), 0);
-        const romPct = Math.min(100, (currentRomPeak / targetRom) * 100);
-        // Accuracy = form quality, not just "did the joint reach the target
-        // angle". A jerky/unstable rep can still touch the target ROM, so
-        // blend in the real stability + smoothness scores (same weighting
-        // pattern as calculate_recovery_score in services/helpers.py) rather
-        // than reporting ROM completion alone.
-        currentAccuracy = Math.min(100,
-            romPct * 0.6 + currentStability * 0.2 + currentSmoothness * 0.2);
+        // Accuracy = score of the rep in progress (or of the last finished rep), scored per
+        // rep on the server: 60% range reached in THAT rep + 20% stability + 20% smoothness
+        // during that rep. Nothing is averaged over time any more.
+        currentAccuracy = liveRepScore != null ? liveRepScore : 0;
     } else if (isBalanceExercise()) {
         // Balance has no joint angle / ROM, so it is scored on steadiness only
         // (accuracy used to sit at 0% for the whole session).
@@ -972,6 +1017,85 @@ function updateAnalytics(primaryAngle, targetRom) {
     updateFeedback(currentAccuracy, currentRom);
 }
 
+function scoreColor(v) {
+    return v >= 85 ? '#1D8A6D' : v >= 70 ? '#D68F35' : '#D9503E';
+}
+
+// Live list of finished reps ("Rep 1 87%"), filled from the server's per-rep scores
+let _repListKey = null;
+function renderRepScores() {
+    const box = document.getElementById('repScoreList');
+    if (!box) return;
+    const key = repScores.join(',') + '|' + repIncomplete;
+    if (key === _repListKey) return;          // runs ~10x/s: only touch the DOM when something changed
+    _repListKey = key;
+    box.replaceChildren();
+    const chip = (text, bg) => {
+        const el = document.createElement('span');
+        el.textContent = text;
+        el.style.cssText = `display:inline-block;margin:2px 4px 2px 0;padding:2px 10px;border-radius:12px;` +
+                           `font-size:12px;font-weight:600;color:#fff;background:${bg}`;
+        box.appendChild(el);
+    };
+    repScores.forEach((v, i) => chip(`Rep ${i + 1}: ${Math.round(v)}%`, scoreColor(v)));
+    if (repIncomplete > 0) chip(`Incomplete: ${repIncomplete}`, '#8a96a3');
+}
+
+// Scores to report when the session ends. If it is stopped while the last counted rep is
+// still in progress, that rep's live score is used for it.
+function getFinalRepScores() {
+    const list = repScores.slice();
+    if (list.length < repCount && liveRepScore != null) list.push(liveRepScore);
+    return list;
+}
+
+// Rows for the report: every attempt in order (correct AND wrong). A wrong attempt is saved
+// with is_completed=false so the PDF shows it as "No". If the session is stopped while the last
+// counted rep is still in progress, that rep is added from its live score / live angle.
+function getFinalAttempts() {
+    const list = repDetails.map(d => ({ done: !!d.done, score: d.score || 0, rom: d.rom || 0,
+                                        speed: d.speed || 0, feedback: d.feedback || '',
+                                        stability: d.stability ?? null, smoothness: d.smoothness ?? null,
+                                        balance: d.balance ?? null, duration: d.duration || 0,
+                                        joints: d.joints || {} }));
+    const correct = list.filter(d => d.done).length;
+    if (correct < repCount && liveRepScore != null)
+        list.push({ done: true, score: liveRepScore, rom: liveRepRom || 0, speed: 0, feedback: 'Stopped during this rep',
+                    stability: null, smoothness: null, balance: null, duration: 0, joints: {} });
+    return list;
+}
+
+// Session accuracy = average of the per-rep scores. Balance has no reps, so it keeps the
+// old steadiness timeline.
+function sessionAccuracy() {
+    const scores = getFinalRepScores();
+    if (!isBalanceExercise() && scores.length) return scores.reduce((t, v) => t + v, 0) / scores.length;
+    return _timeline.length ? _timeline.reduce((t, r) => t + r.acc, 0) / _timeline.length : currentAccuracy;
+}
+
+function buildRepChart(ctx, scores) {
+    return new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: scores.map((v, i) => [`Rep ${i + 1}`, `${Math.round(v)}%`]),
+            datasets: [{ label: 'Rep score %', data: scores, backgroundColor: scores.map(scoreColor),
+                         borderRadius: 6, maxBarThickness: 46 }]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: { backgroundColor: 'rgba(255,255,255,0.95)', titleColor: '#1a2332', bodyColor: '#5a6b7c',
+                           borderColor: 'rgba(0,0,0,0.08)', borderWidth: 1, cornerRadius: 10, padding: 10 }
+            },
+            scales: {
+                y: { beginAtZero: true, max: 100, grid: { color: 'rgba(0,0,0,0.04)' }, ticks: { font: { size: 10 } } },
+                x: { grid: { display: false }, ticks: { font: { size: 11 } } }
+            }
+        }
+    });
+}
+
 function updateFeedback(acc, rom) {
     const t = parseInt(document.getElementById('targetRom').value) || 90;
     let msg, icon, cls;
@@ -989,7 +1113,9 @@ function updateFeedback(acc, rom) {
 
 // Result modal 
 function showResultModal() {
-    const avgAcc  = _timeline.length ? (_timeline.reduce((s,r)=>s+r.acc, 0) / _timeline.length).toFixed(1) : currentAccuracy.toFixed(1);
+    const finalScores = getFinalRepScores();
+    const useReps = !isBalanceExercise() && finalScores.length > 0;
+    const avgAcc  = sessionAccuracy().toFixed(1);
     const avgRom  = _timeline.length ? (_timeline.reduce((s,r)=>s+r.rom, 0) / _timeline.length).toFixed(1) : currentRom.toFixed(1);
     const avgStab = _timeline.length ? (_timeline.reduce((s,r)=>s+r.stab,0) / _timeline.length).toFixed(1) : currentStability.toFixed(1);
 
@@ -998,6 +1124,7 @@ function showResultModal() {
 
     document.getElementById('res_duration').textContent = durStr;
     document.getElementById('res_accuracy').textContent  = `${avgAcc}%`;
+    document.querySelector('#resultModal .result-stat:nth-child(2) .lbl').textContent = useReps ? 'Avg Rep Score' : 'Avg Accuracy';
     document.getElementById('res_rom').textContent       = `${avgRom}°`;
     document.getElementById('res_stability').textContent = `${avgStab}%`;
 
@@ -1016,7 +1143,7 @@ function showResultModal() {
     const stabData = _timeline.length ? _timeline.map(r=>r.stab) : [0, +avgStab];
 
     const ctx = document.getElementById('resultChart').getContext('2d');
-    resultChartInst = new Chart(ctx, {
+    resultChartInst = useReps ? buildRepChart(ctx, finalScores) : new Chart(ctx, {
         type: 'line',
         data: {
             labels,
@@ -1052,11 +1179,14 @@ function showResultModal() {
 
 function closeResult() {
     document.getElementById('resultModal').classList.remove('active');
+    window.SessionRating?.reset();
     resetResultModalLabels();
     if (resultChartInst) { resultChartInst.destroy(); resultChartInst=null; }
     // Reset UI
     currentAccuracy=currentRom=currentStability=repCount=elapsedSec=0;
     currentSmoothness=100; currentBalance=100; currentFatigue=0;
+    repScores = []; repDetails = []; liveRepRom = null; liveRepScore = null; repIncomplete = 0; goalReachedAt = 0;
+    renderRepScores();
     document.getElementById('sessionTimer').textContent    = '00:00';
     document.getElementById('remainingTimer').textContent  = '--:--';
     document.getElementById('accuracyDisplay').textContent = '0%';
@@ -1094,12 +1224,29 @@ async function saveSession() {
     const avg = (key, fallback) =>
         _timeline.length ? _timeline.reduce((s,r)=>s+r[key], 0)/_timeline.length : fallback;
 
-    const avgAcc    = avg('acc',    currentAccuracy);
-    const avgRom    = avg('rom',    currentRom);
-    const avgStab   = avg('stab',   currentStability);
-    const avgSmooth = avg('smooth', currentSmoothness);
-    const avgBal    = avg('bal',    currentBalance);
-    const avgFat    = avg('fat',    currentFatigue);
+    // Every session number below is built from the PER-REP results (correct reps only),
+    // not from the live frame-by-frame readings. The live timeline is only a fallback for
+    // sessions that have no reps at all (Balance exercise, or stopped before the first rep).
+    const attemptsForSave = isBalanceExercise() ? [] : getFinalAttempts();
+    const okAtt = attemptsForSave.filter(a => a.done);
+    const mean = (rows) => { const v = rows.filter(x => x != null); return v.length ? v.reduce((t, x) => t + x, 0) / v.length : null; };
+
+    const avgAcc    = sessionAccuracy();
+    const avgRom    = mean(okAtt.map(a => a.rom))        ?? avg('rom',    currentRom);
+    const avgStab   = mean(okAtt.map(a => a.stability))  ?? avg('stab',   currentStability);
+    const avgSmooth = mean(okAtt.map(a => a.smoothness)) ?? avg('smooth', currentSmoothness);
+    // Hand grip / finger: hands-only frame, no balance signal -> 0 = "N/A" in the report
+    const avgBal    = isFingerExercise() ? 0 : (mean(okAtt.map(a => a.balance)) ?? avg('bal', currentBalance));
+    // Fatigue = how much rep quality dropped from the first half of the reps to the second half
+    let avgFat = avg('fat', currentFatigue);
+    if (okAtt.length >= 4) {
+        const sc = okAtt.map(a => a.score), half = Math.floor(sc.length / 2);
+        const early = sc.slice(0, half).reduce((t, x) => t + x, 0) / half;
+        const late  = sc.slice(half).reduce((t, x) => t + x, 0) / (sc.length - half);
+        avgFat = Math.min(100, Math.max(0, early - late) * 2.5);
+    } else if (okAtt.length) {
+        avgFat = 0;
+    }
 
     // Recovery score on a true 0-100 scale, same weights as
     // services/helpers.calculate_recovery_score (acc 30 / ROM 20 / stability 25 /
@@ -1114,6 +1261,8 @@ async function saveSession() {
     if (!isFingerExercise())  parts.push([avgBal, 0.25]);
     const wSum = parts.reduce((t, [, w]) => t + w, 0);
     const recoveryScore = Math.max(0, Math.min(100, parts.reduce((t, [v, w]) => t + v * w, 0) / wSum));
+
+    const scoresForSave   = isBalanceExercise() ? [] : getFinalRepScores();
 
     const payload = {
         patient_id:          patientId,
@@ -1130,17 +1279,30 @@ async function saveSession() {
         movement_smoothness: +avgSmooth.toFixed(1),
         fatigue_estimation:  +avgFat.toFixed(1),
         recovery_score:      +recoveryScore.toFixed(1),
-        incorrect_movements: Math.max(0, targetReps - repCount),
+        incorrect_movements: repIncomplete,      // real wrong attempts (fell back without reaching the target)
         joint_angles:        jointAngles,
-        exercise_results:    [],
-        session_data:        { timeline: _timeline },
+        exercise_results:    attemptsForSave.map((a, i) => ({
+            exercise_name:     exerciseType,
+            repetition_number: i + 1,
+            accuracy:          +a.score.toFixed(1),
+            rom_achieved:      +a.rom.toFixed(1),
+            speed:             +a.speed.toFixed(1),
+            feedback:          a.feedback,
+            is_completed:      a.done,
+        })),
+        session_data:        { timeline: _timeline, rep_scores: scoresForSave, incomplete_attempts: repIncomplete,
+                               rep_joints: attemptsForSave.map(a => a.joints),   // per rep: degrees each joint moved
+                               rep_stats:  attemptsForSave.map(a => ({ stab: a.stability, smooth: a.smoothness,
+                                                                       bal: a.balance, secs: a.duration })),
+                               recording_id: currentRecordingId },
     };
 
-    return saveSessionPayload(payload);
+    return saveSessionPayload(payload, true);
 }
 
 // Actually performs the save + handles success/failure UI. Returns true/false.
-async function saveSessionPayload(payload) {
+async function saveSessionPayload(payload, track = false) {
+    if (track) window.SessionRating?.saveStarted();
     try {
         const res  = await fetch('/api/sessions', {
             method: 'POST',
@@ -1154,17 +1316,24 @@ async function saveSessionPayload(payload) {
             console.error('saveSession failed:', msg);
             stashFailedSession(payload);
             showToast(`${msg} — saved locally, will retry`, 'error', 5000);
+            if (track) window.SessionRating?.saveFailed();
             return false;
         }
 
         // Success — make sure no stale local backup is replayed on top of it.
         clearStashedSession(payload);
         showToast('Session saved', 'success');
+        if (track) {
+            let saved = {};
+            try { saved = await res.json(); } catch (_) { /* no id in the reply */ }
+            window.SessionRating?.saved(saved.session_id);
+        }
         return true;
     } catch (e) {
         console.error('saveSession network error:', e);
         stashFailedSession(payload);
         showToast('No connection — session saved locally, will retry', 'error', 5000);
+        if (track) window.SessionRating?.saveFailed();
         return false;
     }
 }
@@ -1331,7 +1500,12 @@ async function startGameSession() {
             });
         }
 
-        await fetch('/api/game/calibrate', { method: 'POST' });
+        currentRecordingId = null;
+        const cal = await (await fetch('/api/game/calibrate', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ patient_id: document.getElementById('sessionPatientSelect').value }),
+        })).json();
+        currentRecordingId = (cal && cal.recording_id) || null;
     } catch (e) {
         console.error('startGameSession:', e);
         showToast('Could not start game session', 'error');
@@ -1543,10 +1717,11 @@ async function saveGameSessionPayload(summary, reason) {
             duration_seconds: summary.duration_seconds,
             finish_reason:    reason,
             events:           summary.events || [],
+            recording_id:     currentRecordingId,
             ...part.session_data,
         },
     };
-    return saveSessionPayload(payload);
+    return saveSessionPayload(payload, true);
 }
 
 // Result modal, repurposed for game stats (reuses the exercise result-modal markup)

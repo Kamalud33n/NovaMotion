@@ -90,6 +90,13 @@ except Exception as exc:
     _mp_hands = HAND_CONNECTIONS = None
 
 
+# Values the MediaPipe trackers below are built with; also written into every
+# keypoint recording's meta (services/keypoints/capture_meta.py).
+MEDIAPIPE_MIN_CONFIDENCE = 0.3
+HANDS_MODEL_COMPLEXITY   = 0
+POSE_SMOOTH_LANDMARKS    = False
+
+
 def _pose_complexity() -> int:
     try:
         v = int((os.getenv("POSE_MODEL_COMPLEXITY") or "0").strip())
@@ -106,9 +113,9 @@ def create_pose():
         return _mp_pose.Pose(
             static_image_mode=False,
             model_complexity=_pose_complexity(),
-            smooth_landmarks=False,   # off: its built-in smoothing adds lag; the browser smooths the skeleton instead (static/session.js)
-            min_detection_confidence=0.3,
-            min_tracking_confidence=0.3,
+            smooth_landmarks=POSE_SMOOTH_LANDMARKS,   # off: its built-in smoothing adds lag; the browser smooths the skeleton instead (static/session.js)
+            min_detection_confidence=MEDIAPIPE_MIN_CONFIDENCE,
+            min_tracking_confidence=MEDIAPIPE_MIN_CONFIDENCE,
         )
     except Exception as exc:
         print(f"MediaPipe Pose create failed: {exc}")
@@ -123,9 +130,9 @@ def create_hands():
         return _mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=2,
-            model_complexity=0,
-            min_detection_confidence=0.3,
-            min_tracking_confidence=0.3,
+            model_complexity=HANDS_MODEL_COMPLEXITY,
+            min_detection_confidence=MEDIAPIPE_MIN_CONFIDENCE,
+            min_tracking_confidence=MEDIAPIPE_MIN_CONFIDENCE,
         )
     except Exception as exc:
         print(f"MediaPipe Hands create failed: {exc}")

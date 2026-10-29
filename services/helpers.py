@@ -197,6 +197,7 @@ def balloon_stats(s: SessionModel) -> dict:
         "calibration": sd.get("calibration") or {},
         "settings": sd.get("settings") or {},
         "events": events,
+        "miss_log": sd.get("miss_log") or [],
         "target_reps": sd.get("target_steps"),
         "complete": sd.get("misses") is not None,
     }

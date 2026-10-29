@@ -27,3 +27,7 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+
+# --- generated exports ---
+exports/*
+!exports/.gitkeep

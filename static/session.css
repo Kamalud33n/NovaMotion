@@ -366,6 +366,46 @@
             height: 220px;
             margin-bottom: 20px;
         }
+        .result-rating {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .result-rating-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 10px;
+        }
+        .result-rating-buttons {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+        .rating-btn {
+            min-width: 96px;
+            padding: 10px 20px;
+            border: 2px solid var(--border-color, #d6d8d4);
+            border-radius: 12px;
+            background: transparent;
+            color: var(--text-primary);
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .rating-btn[data-rating="good"]  { border-color: #1D8A6D; }
+        .rating-btn[data-rating="bad"]   { border-color: #c9772b; }
+        .rating-btn[data-rating="worst"] { border-color: #d9503e; }
+        .rating-btn.is-active { color: #fff; }
+        .rating-btn.is-active[data-rating="good"]  { background: #1D8A6D; }
+        .rating-btn.is-active[data-rating="bad"]   { background: #c9772b; }
+        .rating-btn.is-active[data-rating="worst"] { background: #d9503e; }
+        .result-rating-msg {
+            min-height: 18px;
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        .result-rating-msg.is-error { color: #d9503e; }
         .result-actions {
             display: flex;
             gap: 12px;

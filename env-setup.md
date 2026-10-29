@@ -6,9 +6,8 @@ startup, `services/app_config.py`, `services/auth/config.py` and
 is missing or invalid, the app refuses to start and prints **all** the
 problems at once (not just the first one).
 
-There is no `.env.example` file in this build — create `.env` yourself in
-the project root (same folder as `app.py`) using the template below, then
-fill in real values.
+Copy `.env.example` to `.env` in the project root (same folder as `app.py`),
+or build `.env` yourself from the template below, then fill in real values.
 
 ---
 
@@ -152,7 +151,30 @@ EXPORT_API_KEY_HEADER=X-MedNova-Key
   python -c "import secrets; print(secrets.token_urlsafe(32))"
   ```
 
-## 8. Full template (copy-paste, then fill in)
+## 8. ML dataset — needed for data annotation
+
+```env
+DATASET_SALT=
+```
+
+- Every label a clinician saves in the labelling screen is copied into the
+  `dataset_samples` table (except `unusable`). The patient is stored only as
+  an HMAC-SHA256 hash made with this salt, so the dataset holds no patient id.
+- **Empty = nothing is stored in the dataset.** Labels themselves still save;
+  the app prints one warning in the log the first time it skips a sample.
+- Generate one with:
+  ```bash
+  python -c "import secrets; print(secrets.token_hex(32))"
+  ```
+- Treat it like `SECRET_KEY`: keep it private and **never change or lose it**
+  once labelling has started. A different salt gives the same patient a
+  different hash, so old samples can no longer be matched to that patient.
+  (Consent withdrawal and recording purge still remove their samples, because
+  those also delete by recording id.)
+- `docker-compose.yml` already passes the whole `.env` to the app
+  (`env_file`), so nothing else needs changing there.
+
+## 9. Full template (copy-paste, then fill in)
 
 ```env
 # ── Database (MySQL) ─────────────────────────────────────────────────────
@@ -206,9 +228,12 @@ SMTP_TIMEOUT_SECONDS=10
 # ── MedNova export API ────────────────────────────────────────────────────
 EXPORT_API_KEY=
 EXPORT_API_KEY_HEADER=X-MedNova-Key
+
+# ── ML dataset (labelled keypoint segments) ───────────────────────────────
+DATASET_SALT=
 ```
 
-## 9. Quick troubleshooting
+## 10. Quick troubleshooting
 
 | Symptom on startup | Likely cause |
 |---|---|
@@ -217,4 +242,5 @@ EXPORT_API_KEY_HEADER=X-MedNova-Key
 | Can't connect to MySQL on startup | check `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`, that MySQL is actually running, and that `DB_USER` can `CREATE DATABASE` |
 | Forgot-password / OTP emails never arrive | `SMTP_HOST` is empty, or SMTP creds are wrong — check app logs for the SMTP error |
 | `CORS_ALLOW_ORIGINS cannot contain '*'` | login uses cookies, so you must list exact origins (e.g. `http://localhost:3000`), never `*` |
+| Labels save but `dataset_samples` stays empty; log says `DATASET_SALT is not set` | add `DATASET_SALT` to `.env` (section 8) and restart |
 | Admin not created | `ADMIN_NAME`/`ADMIN_EMAIL`/`ADMIN_PASSWORD` weren't all set together, or an admin already exists — check with `python check.py` |

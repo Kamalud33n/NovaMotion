@@ -1,7 +1,8 @@
 import datetime
 from typing import Dict, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from database import get_db
@@ -9,8 +10,13 @@ from models import SessionModel, JointAngle, ExerciseResult, History
 from services.auth.deps import CurrentUser, require_clinical
 from services.ownership import get_owned_patient
 from services.helpers import game_result_line
+from services.keypoints import lifecycle
+from services.labeling import rep_scores
+from services.user_context import get_context
 
 router = APIRouter()
+
+RATINGS = {"good", "bad", "worst"}
 
 
 @router.get("/api/sessions/{patient_id}")
@@ -71,6 +77,21 @@ async def save_session(payload: Dict[str, Any], me: CurrentUser = Depends(requir
         pid = payload.get("patient_id")
         get_owned_patient(db, pid, me)
 
+        session_data = payload.get("session_data")
+        if not isinstance(session_data, dict):
+            session_data = {}
+        session_data.pop("recording", None)      # server-owned key; never trust one sent by the client
+        session_data.pop("rep_auto_scores", None)  # server-owned key too
+        if session_data.get("recording_id"):
+            await run_in_threadpool(lifecycle.attach_recording, get_context(me.id), session_data, pid)
+        recording = session_data.get("recording")
+        if isinstance(recording, dict) and recording.get("recording_id"):
+            # Automatic per-rep scores from the keypoints (never from the clinician's rating).
+            scores = await run_in_threadpool(rep_scores.compute_for_recording, pid,
+                                             str(recording["recording_id"]))
+            if scores:
+                session_data["rep_auto_scores"] = scores
+
         def _dt(key):
             v = payload.get(key)
             if not v:
@@ -97,7 +118,7 @@ async def save_session(payload: Dict[str, Any], me: CurrentUser = Depends(requir
             movement_smoothness = payload.get("movement_smoothness", 0.0),
             fatigue_estimation  = payload.get("fatigue_estimation", 0.0),
             recovery_score      = payload.get("recovery_score", 0.0),
-            session_data        = payload.get("session_data", {}),
+            session_data        = session_data,
         )
         db.add(sess)
         db.flush()
@@ -131,5 +152,32 @@ async def save_session(payload: Dict[str, Any], me: CurrentUser = Depends(requir
             action     = "Session Saved",
             details    = f"Session {sess.id} — {sess.completed_reps} reps",
         ))
+        session_id = sess.id
         db.commit()
-        return JSONResponse({"success": True, "message": "Session saved", "session_id": sess.id})
+        if session_data.get("recording"):
+            # Session is saved: write its id into the recording's meta (never fails the save).
+            await run_in_threadpool(lifecycle.link_session, pid, session_data, session_id)
+        return JSONResponse({"success": True, "message": "Session saved", "session_id": session_id})
+
+
+@router.patch("/api/sessions/{session_id}/rating")
+async def rate_session(session_id: str, payload: Dict[str, Any],
+                       me: CurrentUser = Depends(require_clinical)):
+    """The clinician's overall rating of one saved session: good, bad or worst."""
+    rating = payload.get("rating")
+    if rating not in RATINGS:
+        raise HTTPException(400, "rating must be good, bad or worst")
+    with get_db() as db:
+        sess = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+        if sess is None:
+            raise HTTPException(404, "Session not found")
+        get_owned_patient(db, sess.patient_id, me)
+        data = dict(sess.session_data or {})
+        data["clinician_rating"] = {
+            "value": rating,
+            "by": me.id,
+            "at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        }
+        sess.session_data = data
+        db.commit()
+    return JSONResponse({"success": True, "rating": rating})

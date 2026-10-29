@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Labeling - NovaMotion</title>
+    <link rel="stylesheet" href="/static/style.css?v=2">
+    <link rel="stylesheet" href="/static/labeling/viewer.css?v=3">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="app-container">
+        <aside class="sidebar glass-effect">
+            <div class="sidebar-header">
+                <div class="logo-container">
+                    <img class="logo-icon" src="/assets/logo.png?v=2" alt="MedNova logo" width="44" height="44">
+                    <div class="logo-text">
+                        <span class="logo-title">MedNova</span>
+                        <span class="logo-subtitle">Therapy System</span>
+                    </div>
+                </div>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="/dashboard" class="nav-item"><i class="fas fa-th-large"></i><span>Dashboard</span></a>
+                <a href="/patients"  class="nav-item"><i class="fas fa-users"></i><span>Patients</span></a>
+                <a href="/session"   class="nav-item"><i class="fas fa-video"></i><span>Start Session</span></a>
+                <a href="/reports"   class="nav-item"><i class="fas fa-file-alt"></i><span>Reports</span></a>
+                <a href="/analytics" class="nav-item"><i class="fas fa-chart-line"></i><span>Analysis</span></a>
+                <a href="/settings"  class="nav-item"><i class="fas fa-cog"></i><span>Settings</span></a>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="status-indicator">
+                    <span class="status-dot online"></span>
+                    <span class="status-text">System Online</span>
+                </div>
+            </div>
+        </aside>
+
+        <main class="main-content lv-page">
+            <header class="top-bar glass-effect">
+                <div class="top-bar-left">
+                    <button class="menu-toggle" id="menuToggle"><i class="fas fa-bars"></i></button>
+                    <div class="breadcrumb">
+                        <span>Home</span>
+                        <i class="fas fa-chevron-right"></i>
+                        <span class="active">Labeling</span>
+                    </div>
+                </div>
+                <div class="top-bar-right">
+                    <div class="status-badge">
+                        <span class="badge-dot"></span>
+                        <span>AI Ready</span>
+                    </div>
+                    <button class="logout-btn" onclick="handleLogout()">
+                        <i class="fas fa-sign-out-alt"></i>
+                    </button>
+                </div>
+            </header>
+
+            <div class="content-area">
+
+                <div class="reports-header">
+                    <div class="header-left">
+                        <h2>Recording Viewer</h2>
+                        <p class="header-subtitle">Replay a saved keypoint recording before labeling it</p>
+                    </div>
+                    <div class="header-right">
+                        <div class="report-filters">
+                            <select id="lvPatient" class="glass-select" aria-label="Patient">
+                                <option value="">Select patient</option>
+                            </select>
+                            <select id="lvRecording" class="glass-select lv-select-wide" aria-label="Recording" disabled>
+                                <option value="">Select recording</option>
+                            </select>
+                            <button class="btn-secondary" id="lvRefresh" type="button">
+                                <i class="fas fa-sync"></i> Refresh
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="lv-notice" id="lvDefsNote" hidden>
+                    <i class="fas fa-triangle-exclamation"></i>
+                    <span id="lvDefsNoteText"></span>
+                </div>
+
+                <div class="lv-empty glass-effect" id="lvEmpty">
+                    <i class="fas fa-user" id="lvEmptyIcon"></i>
+                    <h3 id="lvEmptyTitle">Loading...</h3>
+                    <p id="lvEmptyText"></p>
+                </div>
+
+                <div id="lvWorkspace" hidden>
+
+                    <div class="lv-layout">
+                        <section class="lv-card glass-effect">
+                            <div class="lv-stage" id="lvStage">
+                                <canvas id="lvSkeleton"></canvas>
+                                <div class="lv-stage-msg" id="lvStageMsg">Preparing playback...</div>
+                            </div>
+                            <div class="lv-controls">
+                                <button class="lv-btn" id="lvPrev" type="button" title="Previous frame" disabled>
+                                    <i class="fas fa-backward-step"></i>
+                                </button>
+                                <button class="lv-btn lv-btn-main" id="lvPlay" type="button" title="Play / pause" disabled>
+                                    <i class="fas fa-play"></i>
+                                </button>
+                                <button class="lv-btn" id="lvNext" type="button" title="Next frame" disabled>
+                                    <i class="fas fa-forward-step"></i>
+                                </button>
+                                <input class="lv-scrub" id="lvScrub" type="range" min="0" max="0" value="0" step="1"
+                                       aria-label="Frame" disabled>
+                                <div class="lv-readout">
+                                    <span id="lvTimeReadout">0.0 s</span>
+                                    <span class="lv-readout-sub" id="lvFrameReadout">frame 0 / 0</span>
+                                </div>
+                                <select class="glass-select lv-speed" id="lvSpeed" aria-label="Speed" disabled>
+                                    <option value="0.25">0.25x</option>
+                                    <option value="0.5">0.5x</option>
+                                    <option value="1" selected>1x</option>
+                                    <option value="2">2x</option>
+                                </select>
+                            </div>
+                        </section>
+
+                        <aside class="lv-card glass-effect">
+                            <h3 class="lv-card-title">Recording</h3>
+                            <dl class="lv-meta" id="lvMeta"></dl>
+                            <div class="lv-flags" id="lvFlags"></div>
+                        </aside>
+                    </div>
+
+                    <section class="lv-card glass-effect">
+                        <div class="lv-card-head">
+                            <h3 class="lv-card-title">Timeline</h3>
+                            <div class="lv-legend" id="lvLegend">
+                                <span><i class="lv-sw lv-sw-angle"></i>Joint angle</span>
+                                <span><i class="lv-sw lv-sw-rep"></i>Repetition</span>
+                                <span><i class="lv-sw lv-sw-lost"></i>Tracking lost</span>
+                                <span><i class="lv-sw lv-sw-event"></i>Game event</span>
+                                <span><i class="lv-sw lv-sw-good"></i>Good</span>
+                                <span><i class="lv-sw lv-sw-compensating"></i>Compensating</span>
+                                <span><i class="lv-sw lv-sw-incomplete"></i>Incomplete</span>
+                                <span><i class="lv-sw lv-sw-unusable"></i>Unusable</span>
+                                <span><i class="lv-sw lv-sw-select"></i>Selected</span>
+                            </div>
+                        </div>
+                        <div class="lv-timeline" id="lvTimelineWrap">
+                            <canvas id="lvTimeline"></canvas>
+                        </div>
+                    </section>
+
+                    <section class="lv-card glass-effect" id="lvEditor">
+                        <div class="lv-card-head">
+                            <h3 class="lv-card-title">Label</h3>
+                            <span class="lv-sel-info" id="lvSelInfo"></span>
+                        </div>
+                        <p class="lv-editor-hint" id="lvEditorHint">Click a repetition on the timeline to label it.</p>
+                        <div class="lv-editor-body" id="lvEditorBody" hidden>
+                            <div class="lv-suggest" id="lvSuggest" hidden>
+                                <span class="lv-suggest-tag">Suggestion, please check</span>
+                                <span class="lv-suggest-text" id="lvSuggestText"></span>
+                                <button class="btn-secondary lv-suggest-btn" id="lvSuggestAccept" type="button">Accept</button>
+                            </div>
+                            <div class="lv-choices" id="lvChoices" role="group" aria-label="Label"></div>
+                            <div class="lv-tags" id="lvTagsWrap" hidden>
+                                <span class="lv-field-label">Compensation (pick at least one)</span>
+                                <div class="lv-chips" id="lvTags" role="group" aria-label="Compensation tags"></div>
+                            </div>
+                            <div class="lv-editor-row">
+                                <input class="lv-note" id="lvNote" type="text" maxlength="1000"
+                                       placeholder="Note (optional)" aria-label="Note">
+                                <button class="btn-primary" id="lvSave" type="button" hidden>Save</button>
+                                <button class="btn-danger" id="lvDelete" type="button" hidden>Delete</button>
+                                <button class="btn-secondary" id="lvCancel" type="button">Cancel</button>
+                            </div>
+                            <div class="lv-msg" id="lvMsg" role="status" aria-live="polite"></div>
+                        </div>
+                    </section>
+
+                    <section class="lv-card glass-effect">
+                        <div class="lv-card-head">
+                            <h3 class="lv-card-title">Your labels</h3>
+                            <span class="lv-count" id="lvLabelCount">0</span>
+                        </div>
+                        <div class="table-container">
+                            <table class="lv-table">
+                                <thead>
+                                    <tr><th>Frames</th><th>Rep</th><th>Label</th><th>Tags</th><th>Note</th><th></th></tr>
+                                </thead>
+                                <tbody id="lvLabelBody">
+                                    <tr><td colspan="6" class="lv-table-empty">No labels yet</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+    <script src="/static/labeling/page.js?v=1" defer></script>
+    <script src="/static/labeling/skeleton.js?v=1" defer></script>
+    <script src="/static/labeling/timeline.js?v=2" defer></script>
+    <script src="/static/labeling/labels.js?v=2" defer></script>
+    <script src="/static/labeling/viewer.js?v=1" defer></script>
+</body>
+</html>

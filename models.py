@@ -2,7 +2,7 @@ import uuid
 
 from sqlalchemy import (
     Column, String, Integer, Float,
-    DateTime, Text, Boolean, ForeignKey, JSON, LargeBinary
+    DateTime, Text, Boolean, ForeignKey, JSON, LargeBinary, Index
 )
 from sqlalchemy.dialects.mysql import LONGBLOB
 from sqlalchemy.orm import relationship
@@ -53,6 +53,13 @@ class Patient(Base):
     photo              = Column(LargeBinary().with_variant(LONGBLOB, "mysql"), nullable=True)
     date_created       = Column(DateTime, default=func.now())
     is_active          = Column(Boolean, default=True)
+    # Consent to keep the patient's body/hand keypoints (services/keypoints) for
+    # later therapist labelling + ML. Default False: nothing is recorded until a
+    # doctor/therapist explicitly records the patient's consent. Changed only via
+    # POST /api/patients/{id}/keypoint-consent, never by the generic update form.
+    keypoint_consent    = Column(Boolean, nullable=False, default=False)
+    keypoint_consent_at = Column(DateTime, nullable=True)
+    keypoint_consent_by = Column(String(50), nullable=True)   # users.id who recorded it
     sessions = relationship("SessionModel", back_populates="patient", cascade="all, delete-orphan")
 
 
@@ -210,3 +217,63 @@ class PendingSignup(Base):
     otp_attempts    = Column(Integer, nullable=False, default=0)
     last_sent_at    = Column(DateTime, nullable=False)
     created_at      = Column(DateTime, default=func.now())
+
+
+# ── Keypoint labelling (Stage 2a) ────────────────────────────────────────
+# One row = one labelled segment (usually one repetition) of a saved keypoint recording.
+# start_frame is inclusive, end_frame exclusive (Python slice style), so they match the
+# `index` values returned by /api/recordings/{patient}/{recording}/series. The recording
+# itself lives on disk (services/keypoints); recording_id / patient_id are plain indexed
+# columns with no FK. Rows are deleted together with the recording (consent withdrawal,
+# abandoned-recording purge) - see services/keypoints/lifecycle.py.
+# label : id from services/labeling/label_definitions.json; tags : list of tag ids.
+class RecordingLabel(Base):
+    __tablename__ = "recording_labels"
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    recording_id = Column(String(50), nullable=False, index=True)
+    patient_id   = Column(String(50), nullable=False, index=True)
+    labeler_id   = Column(String(50), nullable=False, index=True)   # users.id
+    start_frame  = Column(Integer, nullable=False)
+    end_frame    = Column(Integer, nullable=False)
+    rep_index    = Column(Integer, nullable=True)
+    label        = Column(String(30), nullable=False)
+    tags         = Column(JSON, nullable=True)
+    note         = Column(Text, nullable=True)
+    defs_version = Column(String(30), nullable=False)
+    created_at   = Column(DateTime, default=func.now())
+    updated_at   = Column(DateTime, default=func.now(), onupdate=func.now())
+    __table_args__ = (Index("ix_recording_labels_rec_labeler", "recording_id", "labeler_id"),)
+
+
+# ── ML dataset (Stage 2d) ────────────────────────────────────────────────
+# One row = one labelled segment, stored automatically when a RecordingLabel is saved
+# (services/labeling/dataset_store.py) and removed when that label goes away. `unusable`
+# labels are never stored. `data` is a compressed .npz of the segment's keypoint arrays
+# (t, detected, focus, reps, angle, pose|hands). The patient is only a salted hash
+# (`subject`), so the dataset carries no direct identifier; consent withdrawal and recording
+# purge delete rows through that hash. label_id points at recording_labels.id (no FK).
+class DatasetSample(Base):
+    __tablename__ = "dataset_samples"
+    id             = Column(Integer, primary_key=True, autoincrement=True)
+    label_id       = Column(Integer, nullable=False, unique=True)
+    recording_id   = Column(String(50), nullable=False, index=True)
+    subject        = Column(String(64), nullable=False, index=True)
+    labeler_id     = Column(String(50), nullable=False, index=True)
+    kind           = Column(String(10), nullable=False)
+    exercise       = Column(String(100), nullable=True)
+    mode           = Column(String(20), nullable=True)
+    side           = Column(String(10), nullable=True)
+    fps            = Column(Float, nullable=True)
+    start_frame    = Column(Integer, nullable=False)
+    end_frame      = Column(Integer, nullable=False)
+    n_frames       = Column(Integer, nullable=False)
+    rep_index      = Column(Integer, nullable=True)
+    label          = Column(String(30), nullable=False)
+    tags           = Column(JSON, nullable=True)
+    note           = Column(Text, nullable=True)
+    defs_version   = Column(String(30), nullable=False)
+    detected_ratio = Column(Float, nullable=True)
+    data           = Column(LargeBinary().with_variant(LONGBLOB, "mysql"), nullable=False)
+    created_at     = Column(DateTime, default=func.now())
+    updated_at     = Column(DateTime, default=func.now(), onupdate=func.now())
+    __table_args__ = (Index("ix_dataset_samples_label_kind", "label", "kind"),)

@@ -1,11 +1,4 @@
-"""OTP-gated registration — no DB access happens outside these functions.
-
-Flow: start_signup() sends a code -> verify_otp() checks it and only then
-creates the real `models.User` row (status=pending, same as before, so the
-existing admin-approval flow needs no changes). resend_otp() reissues a
-code for a signup that's already in flight.
-
-A rejected account frees up its email again after REJECTED_RETRY_HOURS.
+"""OTP-gated registration 
 """
 import datetime
 import hashlib

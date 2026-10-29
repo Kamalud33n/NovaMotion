@@ -139,7 +139,7 @@ class RehabRunnerEngine:
     def __init__(self):
         self.lock = threading.Lock()
 
-        self.events = deque(maxlen=200)
+        self.events = deque(maxlen=600)
         self.event_seq = 0
 
         self.status = {
@@ -204,6 +204,11 @@ class RehabRunnerEngine:
         self.step_total = 0
         self.step_total_left = 0
         self.step_total_right = 0
+        self._step_ev = {}              # foot key -> the STEP event still being measured
+        self._crouch_ev = None          # the CROUCH event still being measured
+        self._crouch_t0 = 0.0
+        self._step_t0 = {}
+        self._ank_prev, self._ank_speed = {}, {}    # ankle position/time + ankle speed (torso lengths/s) per foot
         with self.lock:
             self.status.update(x_norm=0.0, lane=1, crouching=False, lateral=0.0,
                                 rise=0.0, bend=0.0, calib_progress=0.0,
@@ -354,9 +359,11 @@ class RehabRunnerEngine:
         peak = max((s for t, s in self.speed_hist if now - t <= 0.6), default=speed)
         with self.lock:
             self.event_seq += 1
-            self.events.append({"id": self.event_seq, "type": mtype, "t": now,
-                                 "left_leg_angle": m["left_leg"], "right_leg_angle": m["right_leg"],
-                                 "knee_angle": m["knee"], "movement_speed": peak})
+            ev = {"id": self.event_seq, "type": mtype, "t": now,
+                  "left_leg_angle": m["left_leg"], "right_leg_angle": m["right_leg"],
+                  "knee_angle": m["knee"], "movement_speed": peak}
+            self.events.append(ev)
+        return ev
 
     def _track_calib_loss(self, now):
         """Restart the neutral measurement if the body is lost for a while."""
@@ -570,6 +577,10 @@ class RehabRunnerEngine:
                 self.fs[k][0] += FOOT_EMA * (x - self.fs[k][0])
                 self.fs[k][1] += FOOT_EMA * (y - self.fs[k][1])
             pos = (self.fs[k][0] / b["torso"], self.fs[k][1] / b["torso"])
+            pv = self._ank_prev.get(k)
+            self._ank_speed[k] = (min(15.0, math.hypot(pos[0] - pv[0][0], pos[1] - pv[0][1]) / (now - pv[1]))
+                                  if pv and now > pv[1] else 0.0)
+            self._ank_prev[k] = (pos, now)
             if self._foot_moved(k, pos, now, allowed):
                 started.append(k)
         mv_l, mv_r = self.foot["la"]["moving"], self.foot["ra"]["moving"]
@@ -585,7 +596,33 @@ class RehabRunnerEngine:
                     self.step_total_left += 1
                 else:
                     self.step_total_right += 1
-                self._emit("STEP_" + ("L" if k == "la" else "R"), now, m, speed)
+                ev = self._emit("STEP_" + ("L" if k == "la" else "R"), now, m, speed)
+                leg0  = m["left_leg"] if k == "la" else m["right_leg"]
+                knee0 = m["kl"] if k == "la" else m["kr"]
+                with self.lock:
+                    ev.update(foot="L" if k == "la" else "R", leg_peak=round(leg0, 1),
+                              knee_min=round(knee0, 1), knee_bend=0.0,
+                              speed_peak=round(self._ank_speed.get(k, 0.0), 2), duration=0.0)
+                self._step_ev[k] = ev
+                self._step_t0[k] = now
+        # keep measuring each step while that foot is still moving: highest leg angle,
+        # deepest knee bend, fastest speed, and how long the movement lasted
+        for k in ("la", "ra"):
+            ev = self._step_ev.get(k)
+            if ev is None:
+                continue
+            if not self.foot[k]["moving"]:
+                self._step_ev.pop(k, None)
+                continue
+            leg  = m["left_leg"] if k == "la" else m["right_leg"]
+            knee = m["kl"] if k == "la" else m["kr"]
+            base_knee = b["kl"] if k == "la" else b["kr"]
+            with self.lock:
+                ev["leg_peak"]   = round(max(ev["leg_peak"], leg), 1)
+                ev["knee_min"]   = round(min(ev["knee_min"], knee), 1)
+                ev["knee_bend"]  = round(max(0.0, base_knee - ev["knee_min"]), 1)
+                ev["speed_peak"] = round(max(ev["speed_peak"], self._ank_speed.get(k, 0.0)), 2)
+                ev["duration"]   = round(now - self._step_t0.get(k, now), 2)
         if self.step_foot is not None or started:
             self.step_active_until = now + STEP_SETTLE_S
         stepping = self.step_foot is not None or now < self.step_active_until
@@ -608,7 +645,9 @@ class RehabRunnerEngine:
             if self.lane_cnt >= LANE_FRAMES:
                 mtype = "LEFT" if cand < self.lane else "RIGHT"
                 self.lane, self.lane_cnt = cand, 0
-                self._emit(mtype, now, m, speed)
+                ev = self._emit(mtype, now, m, speed)
+                with self.lock:
+                    ev["shift"] = round(abs(lateral), 2)      # body shift sideways, in torso lengths
         else:
             self.lane_cnt = 0
 
@@ -623,7 +662,11 @@ class RehabRunnerEngine:
                 if self.crouch_cnt >= CROUCH_FRAMES and now - self.crouch_since >= CROUCH_HOLD_S:
                     self.crouching, self.uncrouch_cnt = True, 0
                     self.step_block_until = now + STEP_BLOCK_S
-                    self._emit("CROUCH", now, m, speed)
+                    ev = self._emit("CROUCH", now, m, speed)
+                    with self.lock:
+                        ev.update(bend=round(bend, 1), drop=round(drop, 3), knee_min=round(m["knee"], 1),
+                                  speed_peak=round(speed, 2), duration=0.0)
+                    self._crouch_ev, self._crouch_t0 = ev, now
             else:
                 self.crouch_cnt, self.crouch_since = 0, None
         else:
@@ -635,6 +678,18 @@ class RehabRunnerEngine:
                     self.step_block_until = now + STEP_BLOCK_S
                     self.crouching, self.crouch_since = False, None
                     self.crouch_cnt, self.uncrouch_cnt = 0, 0
+
+        cev = self._crouch_ev
+        if cev is not None:
+            if self.crouching:
+                with self.lock:
+                    cev["bend"]       = round(max(cev["bend"], bend), 1)
+                    cev["drop"]       = round(max(cev["drop"], drop), 3)
+                    cev["knee_min"]   = round(min(cev["knee_min"], m["knee"]), 1)
+                    cev["speed_peak"] = round(max(cev["speed_peak"], speed), 2)
+                    cev["duration"]   = round(now - self._crouch_t0, 2)
+            else:
+                self._crouch_ev = None
 
         upd.update(lateral=lateral, x_norm=norm, lane=self.lane, rise=rise, bend=bend,
                    crouching=self.crouching, steps=self.step_total,

@@ -1,8 +1,4 @@
 """Emails for the OTP-gated registration flow.
-
-All SMTP plumbing already lives in services/auth/mailer.py (send_email) —
-this module only builds the message bodies, so the connection handling,
-.env config and header-injection guard aren't duplicated.
 """
 import html
 

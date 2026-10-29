@@ -1,0 +1,40 @@
+{
+  "version": "0.1-draft",
+  "status": "DRAFT - based on published rehab-labelling practice; must be reviewed by a physiotherapist before labels are used to train anything",
+  "labels": [
+    {
+      "id": "good",
+      "name": "Good",
+      "description": "Repetition reaches roughly 90% or more of the target range of motion, is smooth and controlled, and shows no compensation.",
+      "allow_tags": false,
+      "require_tags": false
+    },
+    {
+      "id": "compensating",
+      "name": "Compensating",
+      "description": "The repetition may reach the target, but the patient uses other body parts to get there (see compensation tags). Wins over 'incomplete' when both apply.",
+      "allow_tags": true,
+      "require_tags": true
+    },
+    {
+      "id": "incomplete",
+      "name": "Incomplete",
+      "description": "Form is acceptable but the target range is not reached, or the repetition stops part-way.",
+      "allow_tags": false,
+      "require_tags": false
+    },
+    {
+      "id": "unusable",
+      "name": "Unusable",
+      "description": "Not a valid attempt for training: tracking lost, patient out of frame, or not a real repetition. Excluded from export.",
+      "allow_tags": false,
+      "require_tags": false
+    }
+  ],
+  "tags": [
+    {"id": "trunk_forward",      "name": "Trunk forward / lean", "description": "Upper body leans forward to help the movement."},
+    {"id": "trunk_rotation",     "name": "Trunk rotation",       "description": "Torso twists to help the movement."},
+    {"id": "shoulder_elevation", "name": "Shoulder elevation",   "description": "Shoulder is hiked up towards the ear."},
+    {"id": "other",              "name": "Other",                "description": "Any other compensation (e.g. trunk tilt or backward lean); explain in the note."}
+  ]
+}

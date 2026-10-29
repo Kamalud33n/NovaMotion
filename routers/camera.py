@@ -2,7 +2,7 @@
 In-clinic camera router.
 """
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from urllib.parse import urlparse
 
 import cv2
@@ -12,8 +12,9 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from services import mjpeg_camera, game_state
-from services.auth.deps import get_optional_user, require_clinical
+from services.auth.deps import CurrentUser, get_optional_user, require_clinical
 from services.auth.roles import CLINICAL_ROLES
+from services.keypoints import lifecycle
 from services.user_context import UserContext, get_context
 
 router = APIRouter()
@@ -140,6 +141,7 @@ async def api_camera_stop(ctx: UserContext = Depends(user_ctx)):
     """Stop / page unload: clear this user's live flags (and release the
     server-attached camera, if that mode is in use)."""
     mjpeg_camera.stop_camera(ctx)
+    await run_in_threadpool(ctx.recorder.stop, "camera_stopped")
     return JSONResponse({"success": True, "message": "Camera stopped"})
 
 
@@ -190,15 +192,34 @@ def _reset_session_state(ctx: UserContext):
         ctx.pose_data["balance"]       = 100.0
         ctx.pose_data["fatigue"]       = 0.0
         ctx.pose_data["primary_angle"] = None
+        ctx.pose_data["rep_scores"]    = []
+        ctx.pose_data["rep_details"]   = []
+        ctx.pose_data["rep_live_rom"]  = None
+        ctx.pose_data["rep_live"]      = None
+        ctx.pose_data["rep_incomplete"] = 0
         ctx.reset_focus()
 
 
 @router.post("/api/session/reset")
-async def api_session_reset(ctx: UserContext = Depends(user_ctx)):
+async def api_session_reset(payload: Optional[Dict[str, Any]] = None,
+                            ctx: UserContext = Depends(user_ctx),
+                            me: CurrentUser = Depends(require_clinical)):
     """Call this right before a session starts so rep count + stability
-    buffer don't carry over stale data from a previous session/patient."""
+    buffer don't carry over stale data from a previous session/patient.
+    The page also sends patient_id / exercise_type / target_rom / side so the
+    keypoint recording for this session can start (recording_id in the reply)."""
     await run_in_threadpool(_reset_session_state, ctx)   # lock may wait for an in-flight frame
-    return JSONResponse({"success": True, "seq": ctx.pose_data.get("seq", 0)})
+    p = payload or {}
+    exercise = p.get("exercise_type") or ctx.metrics.get_exercise_state()[0]
+    recording_id = await run_in_threadpool(
+        lifecycle.start_exercise_recording, ctx, me, p.get("patient_id"),
+        hand_mode=mjpeg_camera._is_hand_exercise(exercise), exercise=exercise,
+        side=p.get("side"), target_rom=p.get("target_rom"),
+    )
+    skipped = None if recording_id else await run_in_threadpool(
+        lifecycle.block_reason, ctx, me, p.get("patient_id"))
+    return JSONResponse({"success": True, "seq": ctx.pose_data.get("seq", 0),
+                         "recording_id": recording_id, "recording_skipped": skipped})
 
 
 def _relock_focus(ctx: UserContext):
@@ -288,13 +309,20 @@ async def api_game_config(payload: Dict[str, Any], ctx: UserContext = Depends(us
 
 
 @router.post("/api/game/calibrate")
-async def api_game_calibrate(ctx: UserContext = Depends(user_ctx)):
+async def api_game_calibrate(payload: Optional[Dict[str, Any]] = None,
+                             ctx: UserContext = Depends(user_ctx),
+                             me: CurrentUser = Depends(require_clinical)):
     """Reset any stale step/lane/crouch state from a previous session and
     start measuring the neutral standing position now (mirrors
-    /api/session/reset + the exercise flow's calibration screen)."""
+    /api/session/reset + the exercise flow's calibration screen). The page
+    sends patient_id so the keypoint recording can start (recording_id in the reply)."""
     ctx.game.reset_game()
     ctx.game.request_calibration()
-    return JSONResponse({"success": True})
+    recording_id = await run_in_threadpool(
+        lifecycle.start_game_recording, ctx, me, (payload or {}).get("patient_id"))
+    skipped = None if recording_id else await run_in_threadpool(
+        lifecycle.block_reason, ctx, me, (payload or {}).get("patient_id"))
+    return JSONResponse({"success": True, "recording_id": recording_id, "recording_skipped": skipped})
 
 
 @router.get("/api/game/status")

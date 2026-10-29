@@ -16,7 +16,6 @@ STATE_LOCKED = "locked"
 STATE_HOLDING = "holding"
 
 _L_SHOULDER, _R_SHOULDER, _L_HIP, _R_HIP = 11, 12, 23, 24
-_MIN_VISIBILITY = 0.5
 _SCALE_TORSO = "torso"
 _SCALE_SHOULDERS = "shoulders"
 
@@ -51,6 +50,8 @@ class FocusConfig:
     grace_seconds: float = 1.5
     lock_frames: int = 10
     relock_radius: float = 2.0
+    min_visibility: float = 0.3
+    hint_seconds: float = 6.0
 
     @classmethod
     def from_env(cls) -> "FocusConfig":
@@ -63,6 +64,8 @@ class FocusConfig:
             grace_seconds=_env_float("FOCUS_GRACE_SECONDS", d.grace_seconds),
             lock_frames=max(1, _env_int("FOCUS_LOCK_FRAMES", d.lock_frames)),
             relock_radius=_env_float("FOCUS_RELOCK_RADIUS", d.relock_radius),
+            min_visibility=min(1.0, max(0.0, _env_float("FOCUS_MIN_VISIBILITY", d.min_visibility))),
+            hint_seconds=max(0.0, _env_float("FOCUS_HINT_SECONDS", d.hint_seconds)),
         )
 
 
@@ -87,14 +90,14 @@ def _mean(points: Sequence[Tuple[float, float]]) -> Optional[Tuple[float, float]
     return (sum(p[0] for p in points) / len(points), sum(p[1] for p in points) / len(points))
 
 
-def measure(landmarks, frame_shape) -> Optional[BodyRef]:
+def measure(landmarks, frame_shape, min_visibility: float = 0.3) -> Optional[BodyRef]:
     if landmarks is None or len(landmarks) <= _R_HIP:
         return None
     h, w = frame_shape[:2]
 
     def point(idx: int) -> Optional[Tuple[float, float]]:
         lm = landmarks[idx]
-        return (lm.x * w, lm.y * h) if lm.visibility >= _MIN_VISIBILITY else None
+        return (lm.x * w, lm.y * h) if lm.visibility >= min_visibility else None
 
     l_sh, r_sh = point(_L_SHOULDER), point(_R_SHOULDER)
     shoulders = [p for p in (l_sh, r_sh) if p]
@@ -147,7 +150,7 @@ class FocusLock:
     def update(self, landmarks, frame_shape, now: float) -> FocusResult:
         if not self._cfg.enabled:
             return FocusResult(landmarks is not None, STATE_OFF)
-        ref = measure(landmarks, frame_shape)
+        ref = measure(landmarks, frame_shape, self._cfg.min_visibility)
         with self._mutex:
             if self._state == STATE_SEARCHING:
                 return self._search(ref, now)
@@ -161,8 +164,11 @@ class FocusLock:
         self._candidate: Optional[BodyRef] = None
         self._candidate_frames = 0
         self._hint: Optional[BodyRef] = None
+        self._hint_at = 0.0
 
-    def _near_hint(self, ref: BodyRef) -> bool:
+    def _near_hint(self, ref: BodyRef, now: float) -> bool:
+        if self._hint is not None and now - self._hint_at > self._cfg.hint_seconds:
+            self._hint = None
         if self._hint is None:
             return True
         dist = math.hypot(ref.x - self._hint.x, ref.y - self._hint.y)
@@ -174,7 +180,7 @@ class FocusLock:
         return True
 
     def _search(self, ref: Optional[BodyRef], now: float) -> FocusResult:
-        if ref is None or not self._near_hint(ref):
+        if ref is None or not self._near_hint(ref, now):
             self._candidate, self._candidate_frames = None, 0
             return FocusResult(False, STATE_SEARCHING)
 
@@ -207,5 +213,5 @@ class FocusLock:
 
         hint = self._last
         self._clear()
-        self._hint = hint
+        self._hint, self._hint_at = hint, now
         return FocusResult(False, STATE_SEARCHING, reset_tracker=True)

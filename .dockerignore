@@ -11,3 +11,5 @@ data/*
 !uploads/.gitkeep
 !reports/.gitkeep
 !data/.gitkeep
+exports/*
+!exports/.gitkeep

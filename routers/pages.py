@@ -48,6 +48,11 @@ async def page_analytics(request: Request):
     return templates.TemplateResponse(request, "analytics.html", headers=NO_CACHE_HEADERS)
 
 
+@router.get("/labeling", response_class=HTMLResponse, dependencies=clinical_page)
+async def page_labeling(request: Request):
+    return templates.TemplateResponse(request, "labeling/viewer.html", headers=NO_CACHE_HEADERS)
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def page_settings(request: Request, user: CurrentUser = Depends(require_clinical_page)):
     """Doctor / therapist settings page — raise a support ticket (goes straight

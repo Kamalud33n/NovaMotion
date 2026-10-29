@@ -8,7 +8,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="/static/chart.umd.min.js"></script>
-    <link rel="stylesheet" href="/static/session.css?v=3">
+    <link rel="stylesheet" href="/static/session.css?v=4">
 </head>
 <body>
 <div class="app-container">
@@ -294,7 +294,7 @@
                                 <div class="progress-bar"><div class="progress-fill" id="repProgress" style="width:0%"></div></div>
                             </div>
                             <div class="analytics-card">
-                                <span class="analytics-label">Accuracy</span>
+                                <span class="analytics-label">Rep Score</span>
                                 <span class="analytics-value" id="accuracyDisplay">0%</span>
                                 <div class="progress-bar"><div class="progress-fill" id="accuracyProgress" style="width:0%"></div></div>
                             </div>
@@ -309,6 +309,8 @@
                                 <div class="progress-bar"><div class="progress-fill" id="stabilityProgress" style="width:0%"></div></div>
                             </div>
                         </div>
+
+                        <div id="repScoreList" style="margin:10px 0 4px;min-height:4px"></div>
 
                         <div class="feedback-display" id="feedbackDisplay">
                             <div class="feedback-message">
@@ -388,6 +390,16 @@
             <canvas id="resultChart"></canvas>
         </div>
 
+        <div class="result-rating" id="resultRating">
+            <div class="result-rating-title">How was this session overall?</div>
+            <div class="result-rating-buttons">
+                <button type="button" class="rating-btn" data-rating="good">Good</button>
+                <button type="button" class="rating-btn" data-rating="bad">Bad</button>
+                <button type="button" class="rating-btn" data-rating="worst">Worst</button>
+            </div>
+            <div class="result-rating-msg" id="ratingMsg" role="status" aria-live="polite"></div>
+        </div>
+
         <div class="result-actions">
             <button class="btn-primary" onclick="closeResult()">
                 <i class="fas fa-redo"></i> New Session
@@ -406,7 +418,8 @@
 <script src="/static/games/options.js?v=2" defer></script>
 <script src="/static/games/runner.js?v=2" defer></script>
 <script src="/static/games/balloon.js?v=6" defer></script>
-<script src="/static/session.js?v=5" defer></script>
+<script src="/static/session_rating.js?v=1" defer></script>
+<script src="/static/session.js?v=7" defer></script>
 
 
 </body>

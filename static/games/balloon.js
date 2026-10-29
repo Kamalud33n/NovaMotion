@@ -329,6 +329,7 @@ registerGame({
                 calibrated:      !!summary.calibrated,
                 elapsed_seconds: summary.elapsed_seconds || 0,
                 pop_rate:        popRate,
+                miss_log:        summary.miss_log || [],     // every missed balloon, for the report
             },
         };
     },

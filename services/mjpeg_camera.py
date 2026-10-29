@@ -107,6 +107,33 @@ def _draw_hand_skeleton(frame, hand_landmarks_list):
 _HAND_LABEL_SWAPPED = False
 
 
+def _hands_by_label(hand_results, selected):
+    """{"left": landmarks, "right": landmarks} for the selected hands, using
+    the same label rule as _select_hands()."""
+    lms = list(getattr(hand_results, "multi_hand_landmarks", None) or [])
+    handed = list(getattr(hand_results, "multi_handedness", None) or [])
+    out = {}
+    for i, hl in enumerate(lms):
+        if i >= len(handed) or not any(hl is sel for sel in selected):
+            continue
+        try:
+            label = handed[i].classification[0].label.lower()
+        except Exception:
+            continue
+        if _HAND_LABEL_SWAPPED:
+            label = "left" if label == "right" else "right"
+        out.setdefault(label, hl.landmark)
+    return out
+
+
+def _record_frame(ctx, ts, *, pose=None, hands=None, detected=False, angle=None, reps=None, shape=None):
+    rec = ctx.recorder
+    if rec.active:
+        rec.add_frame(ts, pose=pose, hands=hands, focus=ctx.pose_data.get("focus"),
+                      detected=detected, angle=angle, reps=reps,
+                      frame_size=(shape[1], shape[0]) if shape is not None else None)
+
+
 def _ui_side(side: str) -> str:
     """MetricsState.set_exercise_state() stores the side INVERTED (pose mirror fix).
     Undo that here to get what the doctor actually picked in the UI."""
@@ -533,6 +560,13 @@ def _process_frame_locked(ctx: UserContext, frame, overlay: bool = False):
         ctx.pose_data["detected"] = game_person_found
         ctx.pose_data["ts"] = datetime.datetime.now().isoformat()
 
+        if ctx.recorder.active:
+            ctx.game_tap.poll(g.get_engine(), ctx.recorder, now, g.get_active_game_id())
+        _record_frame(
+            ctx, now,
+            pose=game_results.pose_landmarks.landmark if game_person_found else None,
+            detected=game_person_found, shape=frame.shape,
+        )
         return _finish(frame, overlay, items)
 
     active_exercise, target_rom, side = m.get_exercise_state()
@@ -582,6 +616,7 @@ def _process_frame_locked(ctx: UserContext, frame, overlay: bool = False):
 
             primary_angle = metrics.compute_primary_angle(angles, active_exercise, side)
             reps       = m.update_rep_count(primary_angle, target_rom)
+            m.update_joint_angles(angles, active_exercise, side)
             _rep_debug(ctx, active_exercise, side, target_rom, primary_angle)
             # Balance is body-pose-derived (shoulder sway) and does not
             # apply to a hands-only frame, so it stays at its neutral
@@ -598,7 +633,13 @@ def _process_frame_locked(ctx: UserContext, frame, overlay: bool = False):
         ctx.pose_data["balance"]       = balance
         ctx.pose_data["fatigue"]       = fatigue
         ctx.pose_data["primary_angle"] = primary_angle
+        ctx.pose_data.update(m.get_rep_scoring())   # rep_scores / rep_live / rep_incomplete
 
+        _record_frame(
+            ctx, time.time(),
+            hands=_hands_by_label(hand_results, selected_hands) if hand_found else None,
+            detected=detected, angle=primary_angle, reps=reps, shape=frame.shape,
+        )
         return _finish(frame, overlay, items)
 
     # ── Regular body-pose path (all other exercise types) ─────────
@@ -663,6 +704,7 @@ def _process_frame_locked(ctx: UserContext, frame, overlay: bool = False):
         # (no randomness, no duplicated/copied metrics)
         primary_angle = metrics.compute_primary_angle(angles, active_exercise, side)
         reps       = m.update_rep_count(primary_angle, target_rom)
+        m.update_joint_angles(angles, active_exercise, side)
         _rep_debug(ctx, active_exercise, side, target_rom, primary_angle)
         stability  = m.update_stability(lm)
         smoothness = m.update_smoothness(primary_angle)
@@ -682,7 +724,13 @@ def _process_frame_locked(ctx: UserContext, frame, overlay: bool = False):
     ctx.pose_data["balance"]       = balance
     ctx.pose_data["fatigue"]       = fatigue
     ctx.pose_data["primary_angle"] = primary_angle
+    ctx.pose_data.update(m.get_rep_scoring())   # rep_scores / rep_live / rep_incomplete
 
+    _record_frame(
+        ctx, time.time(),
+        pose=results.pose_landmarks.landmark if person_found else None,
+        detected=detected, angle=primary_angle, reps=reps, shape=frame.shape,
+    )
     return _finish(frame, overlay, items)
 
 

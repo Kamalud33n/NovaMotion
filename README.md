@@ -1,4 +1,4 @@
-# Thero — In-Clinic Rehabilitation AI System
+# NovaMotion — In-Clinic Rehabilitation AI System
 
 FastAPI-based in-clinic platform for physiotherapy rehab tracking: webcam +
 MediaPipe pose sessions, patient records, recovery analytics, PDF reports,
@@ -69,7 +69,7 @@ thero/
 │   ├── export.py               # MedNova integration: signed export API (EXPORT_API_KEY)
 │   ├── auth/                   # login, forgot/reset password, profile
 │   │   ├── login.py, forgot_password.py, reset_password.py, profile.py
-│   │   └── _common.py          # shared field-cleaning helpers
+│   │   ├── _common.py          # shared field-cleaning helpers
 │   └── admin/                  # everything admin-only
 │       ├── pages.py            # /admin, /admin/users, /admin/approvals, /admin/tickets, /admin/settings
 │       ├── dashboard.py, users.py, approvals.py, tickets.py
@@ -108,15 +108,19 @@ thero/
 │
 ├── static/                      # app.js / style.css (shared), admin/ and auth/ (page-specific), chart.umd.min.js
 ├── assets/                       # logo + marketing/screenshot images
-├── uploads/ / reports/ / data/   # runtime-written: patient photos, generated PDFs
+├── uploads/ / reports/ / data/   # runtime-written: patient photos, generated PDFs, keypoint recordings
 └── .env                          # not committed — see README-ENV-SETUP.md
 ```
 
 ### A few things worth knowing before you touch the code
 
-- **`assign_owner.py` and `check.py`** are one-off ops scripts, not
-  part of the running app — run manually from the project root when needed
-  (each has a docstring with usage at the top).
+- **Registration** lives in `registration_otp/` (OTP-gated) and is mounted
+  directly in `app.py`.
+- **`assign_owner.py` and `check.py`** are one-off ops scripts, not part of
+  the running app — run manually from the project root when needed (each has
+  a docstring with usage at the top).
+- The app talks to **MySQL only** (`database.py`); there is no SQLite file in
+  the repo.
 - **Camera runs in the browser.** `static/session.js` opens the camera with
   `getUserMedia` (external USB webcam preferred, built-in laptop camera as
   fallback), sends JPEG frames to `/ws/camera` and shows the annotated frame
@@ -205,7 +209,6 @@ python assign_owner.py you@clinic.com --yes   # hand them all to one account
 
 python check.py                               # inspect users table
 python check.py --reset "NewPass123"          # force-reset/create the admin
-
 ```
 
 ## 7. API notes

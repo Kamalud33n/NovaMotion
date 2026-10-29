@@ -192,6 +192,15 @@
                     <textarea id="f_exercise_plan" class="form-input"></textarea>
                 </div>
 
+                <div class="form-group" style="margin-top:16px; padding:12px; border:1px solid #d9dee7; border-radius:8px;">
+                    <label style="display:flex; gap:10px; align-items:flex-start; cursor:pointer; font-weight:500;">
+                        <input type="checkbox" id="f_keypoint_consent" style="margin-top:3px;">
+                        <span>
+                            Movement recording consent
+                        </span>
+                    </label>
+                </div>
+
                 <div class="modal-footer">
                     <button type="button" class="btn-secondary" onclick="closePatientModal()">Cancel</button>
                     <button type="submit" class="btn-primary" id="patientFormSubmitBtn">
@@ -395,6 +404,7 @@
         document.getElementById('patientModalTitle').textContent = 'Add Patient';
         document.getElementById('patientForm').reset();
         document.getElementById('patientIdField').value = '';
+        initialKeypointConsent = false;
         resetPhotoPreview();
         document.getElementById('patientModal').classList.add('active');
     }
@@ -419,6 +429,8 @@
             document.getElementById('f_previous_injury').value      = p.previous_injury || '';
             document.getElementById('f_current_treatment').value    = p.current_treatment || '';
             document.getElementById('f_exercise_plan').value        = p.exercise_plan || '';
+            initialKeypointConsent = !!p.keypoint_consent;
+            document.getElementById('f_keypoint_consent').checked   = initialKeypointConsent;
 
             resetPhotoPreview();
             if (p.photo) {
@@ -443,6 +455,7 @@
     // from the raw <input type=file> since the user can drag/zoom to adjust
     // the crop before it's finalized.
     let processedPhotoBlob = null;
+    let initialKeypointConsent = false;   // consent value when the edit modal opened
     let cropper = null;
     let cropObjectUrl = null;
     let cropSliderLastValue = 0;
@@ -548,6 +561,12 @@
         fd.append('current_treatment', document.getElementById('f_current_treatment').value);
         fd.append('exercise_plan', document.getElementById('f_exercise_plan').value);
         if (id) fd.append('is_active', 'true');
+        const consentChecked = document.getElementById('f_keypoint_consent').checked;
+        if (!id) fd.append('keypoint_consent', consentChecked ? 'true' : 'false');
+        if (id && initialKeypointConsent && !consentChecked &&
+            !confirm('Withdrawing keypoint consent PERMANENTLY deletes all keypoint recordings already saved for this patient. Continue?')) {
+            return;
+        }
 
         // Prefer the auto center-cropped + resized version so the avatar always
         // fits the round frame consistently, regardless of the original photo's
@@ -571,6 +590,19 @@
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail || 'Failed to save patient');
+
+            if (id && consentChecked !== initialKeypointConsent) {
+                const cres = await fetch(`/api/patients/${id}/keypoint-consent`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ granted: consentChecked }),
+                });
+                if (!cres.ok) throw new Error('Patient saved, but the consent change failed. Please retry.');
+                const cdata = await cres.json().catch(() => ({}));
+                if (cdata.deletion_incomplete) {
+                    showToast('Consent withdrawn, but some recordings could not be deleted. Save again to retry.', 'error');
+                }
+            }
 
             showToast(id ? 'Patient updated' : 'Patient added', 'success');
             closePatientModal();

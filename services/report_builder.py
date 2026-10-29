@@ -105,10 +105,14 @@ def _build_recommendations(sessions, avg_acc, avg_rom, rec_score, improvement) -
         return sum((getattr(s, attr) or 0) for s in sessions) / n
 
     avg_stability = _avg("stability_score")
-    avg_balance   = _avg("balance_score")
+    # Balance only exists for exercises that see the whole body; hand grip / finger sessions
+    # store 0 for it, so average over the sessions that really have a value.
+    _bal_vals     = [s.balance_score for s in sessions if s.balance_score]
+    avg_balance   = (sum(_bal_vals) / len(_bal_vals)) if _bal_vals else None
     avg_smooth    = _avg("movement_smoothness")
     avg_fatigue   = _avg("fatigue_estimation")
     avg_incorrect = _avg("incorrect_movements")
+    has_rom       = any(s.average_rom for s in sessions)   # Balance Exercise has no ROM at all
 
     total_reps_target = sum(s.total_reps for s in sessions)
     total_reps_done   = sum(s.completed_reps for s in sessions)
@@ -127,13 +131,13 @@ def _build_recommendations(sessions, avg_acc, avg_rom, rec_score, improvement) -
     # --- Priority: needs attention now ---
     if avg_acc < 60:
         priority.append("Accuracy is below target — slow down repetitions and prioritize correct form over speed.")
-    if avg_rom < 50:
+    if has_rom and avg_rom < 50:
         priority.append("Range of motion is limited — add gentle stretching/mobility work before each session.")
     if avg_fatigue > 60:
         priority.append("Fatigue levels are running high during sessions — consider shorter sets with more rest between reps.")
     if avg_incorrect > 3:
         priority.append(f"An average of {avg_incorrect:.1f} incorrect movements per session were recorded — review technique with the therapist.")
-    if avg_balance < 50:
+    if avg_balance is not None and avg_balance < 50:
         priority.append("Balance scores are low — incorporate dedicated balance/stability drills.")
     if improvement < -5:
         priority.append(f"Performance has dipped ({improvement:+.1f}%) compared to earlier sessions — worth discussing with the therapist.")
@@ -141,12 +145,12 @@ def _build_recommendations(sessions, avg_acc, avg_rom, rec_score, improvement) -
     # --- General: moderate areas still worth coaching ---
     if 60 <= avg_acc < 75:
         general.append("Accuracy is moderate — continued focus on controlled movement should improve this further.")
-    if 50 <= avg_rom < 65:
+    if has_rom and 50 <= avg_rom < 65:
         general.append("Range of motion is improving but still limited — keep up mobility exercises.")
     if avg_smooth < 60:
         general.append("Movement smoothness could improve — practicing at a slower, steadier pace may help.")
     if 50 <= avg_stability < 65:
-        general.append("Stability is improving but still developing — continue balance-focused exercises.")
+        general.append("Stability is improving but still developing — focus on keeping the body / hand steady during each rep.")
     if rep_completion < 80:
         general.append(f"Only {rep_completion:.0f}% of prescribed reps were completed on average — encourage finishing full sets where possible.")
     if avg_gap_days is not None and avg_gap_days > 5:
@@ -393,7 +397,7 @@ _B_LEVEL   = {0: "Low", 1: "Mid", 2: "High"}
 _B_ARMCFG  = {"left": "Left arm", "right": "Right arm", "both_alt": "Both (alternate)"}
 _B_MODECFG = {"abd": "Abduction (side)", "flex": "Flexion (forward)", "mixed": "Mixed"}
 _B_ORDER   = {0: "Random", 1: "Low to high", 2: "High to low"}
-_B_EVENT_ROWS_MAX = 40
+_B_EVENT_ROWS_MAX = 100
 
 
 def _fmt_deg(v) -> str:
@@ -589,13 +593,18 @@ def _balloon_session_blocks(s: SessionModel, st: dict) -> list:
             Spacer(1, 22),
         ]
 
-    # Every balloon popped
-    events = b["events"]
-    if events:
-        rows = []
-        for e in events[:_B_EVENT_ROWS_MAX]:
+    # Every balloon, popped AND missed, in the order they appeared
+    log = [dict(e, _result="Popped") for e in b["events"]] + \
+          [dict(m, _result="Missed") for m in (b.get("miss_log") or [])]
+    if log:
+        if all(x.get("n") is not None for x in log):
+            log.sort(key=lambda x: x["n"])
+        rows, bad_rows = [], []
+        for i, e in enumerate(log[:_B_EVENT_ROWS_MAX], start=1):
+            if e["_result"] == "Missed":
+                bad_rows.append(i)
             rows.append([
-                Paragraph(str(e.get("id", "")), st["table_cell"]),
+                Paragraph(str(i), st["table_cell"]),
                 Paragraph(_B_ARM.get(e.get("side"), "—"), st["table_cell"]),
                 Paragraph(_B_PLANE.get(e.get("plane"), "—"), st["table_cell"]),
                 Paragraph(_B_LEVEL.get(e.get("level"), "—"), st["table_cell"]),
@@ -603,17 +612,68 @@ def _balloon_session_blocks(s: SessionModel, st: dict) -> list:
                 Paragraph(_fmt_deg(e.get("peak")), st["table_cell"]),
                 Paragraph(f"{e.get('time_to_pop', 0):.1f}s", st["table_cell"]),
                 Paragraph(str(e.get("lean_events", 0)), st["table_cell"]),
+                Paragraph(e["_result"] if e["_result"] == "Popped" else "<b>Missed</b>", st["table_cell"]),
             ])
+        tbl = st["data_table"](
+            ["#", "Arm", "Movement", "Height", "Target", "Peak Reached", "Time", "Lean", "Result"],
+            rows, [0.06, 0.10, 0.15, 0.10, 0.12, 0.15, 0.10, 0.08, 0.14])
+        tbl.setStyle(TableStyle([("BACKGROUND", (0, i), (-1, i), colors.HexColor("#FBE9E7")) for i in bad_rows]))
         story += [
-            st["section_header"]("Balloon-by-Balloon Log"), Spacer(1, 10),
-            st["data_table"](["#", "Arm", "Movement", "Height", "Target", "Peak", "Time to Pop", "Lean"],
-                             rows, [0.07, 0.12, 0.17, 0.12, 0.14, 0.14, 0.14, 0.10]),
+            st["section_header"]("Balloon-by-Balloon Log"), Spacer(1, 8),
+            Paragraph("Peak Reached = highest arm angle in that balloon; Target = angle needed to pop it. "
+                      "Missed balloons (red) show how far the arm got before time ran out.", st["body"]),
+            Spacer(1, 8), tbl,
         ]
-        if len(events) > _B_EVENT_ROWS_MAX:
+        if len(log) > _B_EVENT_ROWS_MAX:
             story += [Spacer(1, 6),
-                      Paragraph(f"Showing the first {_B_EVENT_ROWS_MAX} of {len(events)} balloons.", st["body"])]
+                      Paragraph(f"Showing the first {_B_EVENT_ROWS_MAX} of {len(log)} balloons.", st["body"])]
         story.append(Spacer(1, 22))
     return story
+
+
+# ── Rehab Runner: one row per movement ───────────────────────────────────
+_RUNNER_MOVES = {"STEP_L": "Step · Left foot", "STEP_R": "Step · Right foot", "CROUCH": "Crouch",
+                 "LEFT": "Side move · Left", "RIGHT": "Side move · Right"}
+_RUNNER_ROWS_MAX = 100
+
+
+def _runner_movement_blocks(sd: dict, st: dict) -> list:
+    """Every step / crouch / side move of a Rehab Runner round with the joint angles of
+    that movement. Sessions saved before this data was recorded have no leg/knee values, so
+    the table is skipped for them rather than filled with dashes."""
+    events = [e for e in (sd.get("events") or []) if e.get("type") in _RUNNER_MOVES]
+    if not any(("leg_peak" in e) or ("bend" in e) for e in events):
+        return []
+
+    def deg(v):
+        return f"{v:.0f}°" if v is not None else "—"
+
+    rows = []
+    for i, e in enumerate(events[:_RUNNER_ROWS_MAX], start=1):
+        t = e.get("type")
+        rows.append([
+            Paragraph(str(i), st["table_cell"]),
+            Paragraph(_RUNNER_MOVES[t], st["table_cell"]),
+            Paragraph(deg(e.get("leg_peak")) if t.startswith("STEP") else "—", st["table_cell"]),
+            Paragraph(deg(e.get("knee_bend") if t.startswith("STEP") else e.get("bend")), st["table_cell"]),
+            Paragraph(f"{e['drop'] * 100:.0f}%" if t == "CROUCH" and e.get("drop") is not None else "—", st["table_cell"]),
+            Paragraph(f"{e['speed_peak']:.1f}" if e.get("speed_peak") is not None else "—", st["table_cell"]),
+            Paragraph(f"{e['duration']:.1f}s" if e.get("duration") else "—", st["table_cell"]),
+        ])
+    out = [
+        st["section_header"]("Movement Log"), Spacer(1, 8),
+        Paragraph("Leg angle = highest angle the leg lifted away from straight down. "
+                  "Knee bend = degrees the knee bent from standing. "
+                  "Hip drop = how far the hips lowered, as % of torso length. "
+                  "Speed in torso-lengths per second.", st["body"]),
+        Spacer(1, 8),
+        st["data_table"](["#", "Movement", "Leg angle", "Knee bend", "Hip drop", "Speed", "Time"],
+                         rows, [0.07, 0.27, 0.14, 0.14, 0.12, 0.12, 0.14]),
+    ]
+    if len(events) > _RUNNER_ROWS_MAX:
+        out += [Spacer(1, 6), Paragraph(f"Showing the first {_RUNNER_ROWS_MAX} of {len(events)} movements.", st["body"])]
+    out.append(Spacer(1, 22))
+    return out
 
 
 def build_report_sync(
@@ -901,6 +961,112 @@ def build_report_sync(
     return filepath
 
 
+
+# ── Per-rep based session numbers ────────────────────────────────────────
+# Every figure in an exercise session report is built from the individual reps (the
+# Repetition Breakdown rows), never from the live frame-by-frame readings. Sessions saved
+# before per-rep stability/smoothness/balance existed fall back to the stored session values.
+_JOINT_ORDER = ["Thumb", "Index finger", "Middle finger", "Ring finger", "Pinky finger"]
+
+
+def _is_hand_exercise(name: str) -> bool:
+    n = (name or "").lower()
+    return "grip" in n or "finger" in n
+
+
+def _ordered_joint_names(names: list) -> list:
+    """Fixed column order (the DB's JSON column does not keep the order the keys were saved in)."""
+    return sorted(names, key=lambda n: _JOINT_ORDER.index(n) if n in _JOINT_ORDER else len(_JOINT_ORDER))
+
+
+def _mean(vals):
+    vals = [v for v in vals if v is not None]
+    return sum(vals) / len(vals) if vals else None
+
+
+def _rep_summary(s: SessionModel, attempts: list) -> dict:
+    """Session-level numbers computed from the per-rep rows (correct reps only)."""
+    sd = s.session_data or {}
+    stats = [x if isinstance(x, dict) else {} for x in (sd.get("rep_stats") or [])]
+    has_stats = any(x.get("stab") is not None for x in stats)
+    rows = []
+    for i, er in enumerate(attempts):
+        st_ = stats[i] if i < len(stats) else {}
+        rows.append(dict(done=bool(er.is_completed), acc=er.accuracy, rom=er.rom_achieved,
+                         stab=st_.get("stab"), smooth=st_.get("smooth"), bal=st_.get("bal")))
+    ok = [r for r in rows if r["done"]]
+    n_wrong = len(rows) - len(ok)
+
+    fatigue = None
+    if len(ok) >= 4:
+        half = len(ok) // 2
+        early = _mean([r["acc"] for r in ok[:half]])
+        late = _mean([r["acc"] for r in ok[half:]])
+        fatigue = min(100.0, max(0.0, early - late) * 2.5)
+    elif ok:
+        fatigue = 0.0
+    return dict(
+        rows=rows, has_stats=has_stats, n_wrong=n_wrong,
+        rom=_mean([r["rom"] for r in ok]) if ok else None,
+        stab=_mean([r["stab"] for r in ok]), smooth=_mean([r["smooth"] for r in ok]),
+        bal=_mean([r["bal"] for r in ok]), fatigue=fatigue,
+    )
+
+
+def _session_notes(s: SessionModel, rs: dict, rep_joints: list, names: list) -> list:
+    """Notes that talk about THIS session's reps (which rep was weak, how quality changed
+    from the first to the second half, which finger moved least ...), not generic advice."""
+    rows, notes = rs["rows"], []
+    if not rows:
+        return notes
+    ok = [(i + 1, r) for i, r in enumerate(rows) if r["done"]]
+    bad = [i + 1 for i, r in enumerate(rows) if not r["done"]]
+
+    if bad:
+        shown = ", ".join(f"#{n}" for n in bad[:8]) + ("…" if len(bad) > 8 else "")
+        notes.append(f"{len(bad)} of {len(rows)} attempts were wrong (rep {shown}) — the movement fell back "
+                     f"before reaching the target range. Check the Feedback column for each one.")
+    else:
+        notes.append(f"All {len(rows)} attempts reached the target range.")
+
+    if len(ok) >= 2:
+        best = max(ok, key=lambda x: x[1]["acc"]); worst = min(ok, key=lambda x: x[1]["acc"])
+        notes.append(f"Best rep: #{best[0]} ({best[1]['acc']:.0f}%) · weakest correct rep: #{worst[0]} ({worst[1]['acc']:.0f}%).")
+
+    if len(ok) >= 4:
+        half = len(ok) // 2
+        early = _mean([r["acc"] for _, r in ok[:half]]); late = _mean([r["acc"] for _, r in ok[half:]])
+        if early - late >= 5:
+            notes.append(f"Rep quality dropped from {early:.0f}% (first half) to {late:.0f}% (second half) — "
+                         f"signs of fatigue; try shorter sets with rest.")
+        elif late - early >= 5:
+            notes.append(f"Rep quality improved from {early:.0f}% to {late:.0f}% as the session went on.")
+        else:
+            notes.append("Rep quality stayed consistent from the first half to the second half.")
+
+    if rs["smooth"] is not None and rs["smooth"] < 60:
+        notes.append(f"Reps averaged {rs['smooth']:.0f} for smoothness — slower, steadier movement will help.")
+    if rs["stab"] is not None and rs["stab"] < 60:
+        held = "hand" if _is_hand_exercise(s.exercise_type) else "body"
+        notes.append(f"Reps averaged {rs['stab']:.0f} for stability — keep the {held} still between movements.")
+
+    # Hand grip: the finger that moved the least over the correct reps
+    fingers = [n for n in names if n in _JOINT_ORDER and n != "Thumb"]
+    if fingers and _is_hand_exercise(s.exercise_type):
+        ok_idx = [i for i, r in enumerate(rows) if r["done"]]
+        avgs = {}
+        for f in fingers:
+            v = _mean([(rep_joints[i] or {}).get(f) for i in ok_idx if i < len(rep_joints)])
+            if v is not None:
+                avgs[f] = v
+        if len(avgs) >= 2:
+            lo = min(avgs, key=avgs.get); hi = max(avgs, key=avgs.get)
+            if avgs[hi] > 0 and (avgs[hi] - avgs[lo]) / avgs[hi] >= 0.15:
+                notes.append(f"{lo} moved the least (avg {avgs[lo]:.0f}° per rep vs {avgs[hi]:.0f}° for {hi.lower()}) "
+                             f"— give it extra attention.")
+    return notes[:6]
+
+
 def build_session_report_sync(patient_id: str, session_id: str) -> str:
     """Detailed report for a single session — one game round or one
     exercise session, shown in full rather than averaged into a period
@@ -970,9 +1136,26 @@ def build_session_report_sync(patient_id: str, session_id: str) -> str:
                     ("Lives Remaining",  str(lives) if lives is not None else "—"),
                     ("Recovery Score",   f"{s.recovery_score:.1f}%" if s.recovery_score else "—"),
                 ]),
+                Spacer(1, 8),
+                st["metric_row"]([
+                    ("Crouches",   str(sum(1 for e in (sd.get("events") or []) if e.get("type") == "CROUCH"))),
+                    ("Side Moves", str(sum(1 for e in (sd.get("events") or []) if e.get("type") in ("LEFT", "RIGHT")))),
+                ]),
                 Spacer(1, 22),
             ]
+            story += _runner_movement_blocks(sd, st)
         else:
+            # All numbers come from the individual reps; sessions saved before per-rep
+            # stability/smoothness existed fall back to the values stored on the session.
+            _att = sorted(s.exercise_results, key=lambda e: e.repetition_number)
+            rs = _rep_summary(s, _att)
+            hand = _is_hand_exercise(s.exercise_type)
+
+            def _f(per_rep, stored, suffix=""):
+                v = per_rep if (per_rep is not None and rs["has_stats"]) else stored
+                return f"{v:.1f}{suffix}" if v else "N/A"
+
+            avg_rom_v = rs["rom"] if rs["rom"] is not None else s.average_rom
             story += [
                 st["metric_row"]([
                     ("Exercise", s.exercise_type[:24]),
@@ -982,20 +1165,21 @@ def build_session_report_sync(patient_id: str, session_id: str) -> str:
                 Spacer(1, 8),
                 st["metric_row"]([
                     ("Accuracy",       f"{s.accuracy_percentage:.1f}%"),
-                    ("Avg ROM",        f"{s.average_rom:.1f}°"),
+                    ("Avg ROM",        f"{avg_rom_v:.1f}°" if avg_rom_v else "N/A"),
                     ("Recovery Score", f"{s.recovery_score:.1f}%"),
                 ]),
                 Spacer(1, 8),
                 st["metric_row"]([
-                    ("Stability",  f"{s.stability_score:.1f}" if s.stability_score else "N/A"),
-                    ("Balance",    f"{s.balance_score:.1f}" if s.balance_score else "N/A"),
-                    ("Smoothness", f"{s.movement_smoothness:.1f}" if s.movement_smoothness else "N/A"),
+                    ("Stability",  _f(rs["stab"], s.stability_score)),
+                    ("Smoothness", _f(rs["smooth"], s.movement_smoothness)),
+                    ("Balance",    "N/A" if hand else _f(rs["bal"], s.balance_score)),
                 ]),
                 Spacer(1, 8),
                 st["metric_row"]([
-                    ("Fatigue",             f"{s.fatigue_estimation:.1f}" if s.fatigue_estimation else "N/A"),
-                    ("Incorrect Movements", str(s.incorrect_movements)),
-                    ("Session ID",          s.id[:8]),
+                    ("Fatigue",         _f(rs["fatigue"], s.fatigue_estimation) if rs["fatigue"] is None
+                                        else f"{rs['fatigue']:.1f}"),
+                    ("Wrong Attempts",  str(rs["n_wrong"] if rs["rows"] else s.incorrect_movements)),
+                    ("Session ID",      s.id[:8]),
                 ]),
                 Spacer(1, 22),
             ]
@@ -1003,56 +1187,92 @@ def build_session_report_sync(patient_id: str, session_id: str) -> str:
         # Per-rep breakdown — exercise sessions only (game rounds don't log
         # ExerciseResult rows, they log steps/score in session_data instead)
         if s.exercise_results:
-            rows = []
-            for er in sorted(s.exercise_results, key=lambda e: e.repetition_number)[:20]:
-                rows.append([
+            attempts = sorted(s.exercise_results, key=lambda e: e.repetition_number)[:60]
+            n_ok  = sum(1 for er in attempts if er.is_completed)
+            n_bad = len(attempts) - n_ok
+            rows, bad_rows = [], []
+            _rs = _rep_summary(s, attempts)
+            _hand = _is_hand_exercise(s.exercise_type)
+            _show_bal = (not _hand) and any(r["bal"] is not None for r in _rs["rows"])
+            _show_st = _rs["has_stats"]
+
+            def _c(v):
+                return Paragraph(f"{v:.0f}" if v is not None else "—", st["table_cell"])
+
+            for i, er in enumerate(attempts, start=1):
+                # ROM / speed are only real when the attempt was saved with them; older
+                # sessions stored 0 there, so show "—" instead of a misleading 0.0.
+                if not er.is_completed:
+                    bad_rows.append(i)
+                r = _rs["rows"][i - 1]
+                row = [
                     Paragraph(str(er.repetition_number), st["table_cell"]),
                     Paragraph(f"{er.accuracy:.1f}%", st["table_cell"]),
-                    Paragraph(f"{er.rom_achieved:.1f}°", st["table_cell"]),
-                    Paragraph(f"{er.speed:.1f}", st["table_cell"]),
-                    Paragraph("Yes" if er.is_completed else "No", st["table_cell"]),
-                    Paragraph((er.feedback or "—")[:40], st["table_cell"]),
-                ])
+                    Paragraph(f"{er.rom_achieved:.1f}°" if er.rom_achieved else "—", st["table_cell"]),
+                    Paragraph(f"{er.speed:.1f}" if er.speed else "—", st["table_cell"]),
+                ]
+                if _show_st:
+                    row += [_c(r["stab"]), _c(r["smooth"])]
+                if _show_bal:
+                    row.append(_c(r["bal"]))
+                row += [
+                    Paragraph("Yes" if er.is_completed else "<b>No</b>", st["table_cell"]),
+                    Paragraph(er.feedback or "—", st["table_cell"]),
+                ]
+                rows.append(row)
+            _hdr = ["Rep", "Accuracy", "ROM", "Speed (°/s)"]
+            _w = [0.07, 0.12, 0.11, 0.12]
+            if _show_st:
+                _hdr += ["Stability", "Smooth"]; _w += [0.10, 0.10]
+            if _show_bal:
+                _hdr += ["Balance"]; _w += [0.09]
+            _hdr += ["Done", "Feedback"]; _w += [0.08, 0.0]
+            _w[-1] = round(1.0 - sum(_w), 3)
+            tbl = st["data_table"](_hdr, rows, _w)
+            # wrong attempts get a light red row so they stand out at a glance
+            tbl.setStyle(TableStyle([("BACKGROUND", (0, i), (-1, i), colors.HexColor("#FBE9E7")) for i in bad_rows]))
             story += [
-                st["section_header"]("Repetition Breakdown"), Spacer(1, 10),
-                st["data_table"](
-                    ["Rep", "Accuracy", "ROM", "Speed", "Done", "Feedback"],
-                    rows,
-                    [0.08, 0.14, 0.12, 0.12, 0.10, 0.44],
-                ),
+                st["section_header"]("Repetition Breakdown"), Spacer(1, 8),
+                Paragraph(f"Correct reps: <b>{n_ok}</b> &nbsp;·&nbsp; Wrong attempts: <b>{n_bad}</b> "
+                          f"&nbsp;·&nbsp; ROM = "
+                          + ("average curl of the 4 fingers (thumb not counted) in that rep."
+                             if _hand else "highest angle reached in that rep.")
+                          + ("<br/>Stability / Smooth / Balance = average during that rep only." if _show_st else ""),
+                          st["body"]),
+                Spacer(1, 8),
+                tbl,
                 Spacer(1, 22),
             ]
 
-        # Joint-level accuracy summary — aggregated per joint rather than a
-        # raw per-frame log, which would run to hundreds of rows.
-        if s.joint_angles:
-            by_joint = {}
-            for ja in s.joint_angles:
-                bucket = by_joint.setdefault(ja.joint_name, {"angles": [], "targets": [], "correct": 0, "n": 0})
-                bucket["angles"].append(ja.angle_value)
-                if ja.target_angle is not None:
-                    bucket["targets"].append(ja.target_angle)
-                bucket["correct"] += 1 if ja.is_correct else 0
-                bucket["n"] += 1
-
-            rows = []
-            for joint, b in sorted(by_joint.items()):
-                avg_angle   = sum(b["angles"]) / b["n"]
-                avg_target  = (sum(b["targets"]) / len(b["targets"])) if b["targets"] else None
-                pct_correct = (b["correct"] / b["n"]) * 100
-                rows.append([
-                    Paragraph(joint, st["table_cell"]),
-                    Paragraph(f"{avg_angle:.1f}°", st["table_cell"]),
-                    Paragraph(f"{avg_target:.1f}°" if avg_target is not None else "—", st["table_cell"]),
-                    Paragraph(f"{pct_correct:.0f}%", st["table_cell"]),
+        # Joint movement per rep — for every rep (and wrong attempt) how many degrees each
+        # joint moved (largest minus smallest angle in that rep). Replaces the old averaged
+        # "Joint Angle Summary", which was just one end-of-session snapshot.
+        rep_joints = sd.get("rep_joints") or []
+        names = []
+        for rj in rep_joints:
+            for k in (rj or {}):
+                if k not in names:
+                    names.append(k)
+        names = _ordered_joint_names(names)
+        if names and s.exercise_results:
+            attempts = sorted(s.exercise_results, key=lambda e: e.repetition_number)[:60]
+            rows, bad_rows = [], []
+            for i, er in enumerate(attempts, start=1):
+                rj = rep_joints[i - 1] if i - 1 < len(rep_joints) and rep_joints[i - 1] else {}
+                if not er.is_completed:
+                    bad_rows.append(i)
+                rows.append([Paragraph(str(er.repetition_number), st["table_cell"])] + [
+                    Paragraph(f"{rj[n]:.1f}°" if n in rj else "—", st["table_cell"]) for n in names
                 ])
+            rest = 0.88 / len(names)
+            tbl = st["data_table"](["Rep"] + names, rows, [0.12] + [rest] * len(names))
+            tbl.setStyle(TableStyle([("BACKGROUND", (0, i), (-1, i), colors.HexColor("#FBE9E7")) for i in bad_rows]))
             story += [
-                st["section_header"]("Joint Angle Summary"), Spacer(1, 10),
-                st["data_table"](
-                    ["Joint", "Avg Angle", "Avg Target", "% Correct"],
-                    rows,
-                    [0.32, 0.23, 0.23, 0.22],
-                ),
+                st["section_header"]("Joint Movement per Rep"), Spacer(1, 8),
+                Paragraph("Degrees each joint moved in that rep (largest angle minus smallest angle).",
+                          st["body"]),
+                Spacer(1, 8),
+                tbl,
                 Spacer(1, 22),
             ]
 
@@ -1061,10 +1281,15 @@ def build_session_report_sync(patient_id: str, session_id: str) -> str:
         # reason about; see helpers.py).
         if not is_game:
             story += [st["section_header"]("Notes"), Spacer(1, 10)]
-            recs = _build_recommendations(
-                [s], s.accuracy_percentage, s.average_rom,
-                calculate_recovery_score([s]), 0.0,
-            )
+            recs = []
+            if s.exercise_results:
+                _att2 = sorted(s.exercise_results, key=lambda e: e.repetition_number)
+                recs = _session_notes(s, _rep_summary(s, _att2), rep_joints, names)
+            if not recs:      # no reps recorded (e.g. Balance exercise) -> the general rules
+                recs = _build_recommendations(
+                    [s], s.accuracy_percentage, s.average_rom,
+                    calculate_recovery_score([s]), 0.0,
+                )
             for r in recs:
                 story.append(Paragraph(f"■&nbsp;&nbsp;{r}", st["body"]))
                 story.append(Spacer(1, 5))

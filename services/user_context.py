@@ -27,6 +27,7 @@ import config
 from services.metrics import MetricsState
 from services.game_state import GameState
 from services.focus_lock import FocusLock
+from services.keypoints import GameEventTap, KeypointRecorder
 
 # A context nobody has touched for this long (and with no camera socket open)
 # is dropped to free its MediaPipe models. 30 min keeps the state alive long
@@ -41,6 +42,7 @@ def new_pose_data() -> Dict[str, Any]:
         "detected": False, "angles": {}, "ts": None,
         "reps": 0, "stability": 100.0, "primary_angle": None,
         "smoothness": 100.0, "balance": 100.0, "fatigue": 0.0,
+        "rep_scores": [], "rep_details": [], "rep_live": None, "rep_live_rom": None, "rep_incomplete": 0,
         "focus": "searching",
     }
 
@@ -53,6 +55,8 @@ class UserContext:
         self.pose_data: Dict[str, Any] = new_pose_data()
         self.focus = FocusLock()
         self.focus_key = None
+        self.recorder = KeypointRecorder()
+        self.game_tap = GameEventTap()
 
         # process_frame() for this user runs one frame at a time (MediaPipe
         # trackers + metrics are stateful); other users run in parallel.
@@ -123,6 +127,7 @@ class UserContext:
             return self._hands
 
     def close(self):
+        self.recorder.stop("context_closed")
         with self._models_lock:
             for m in (self._pose, self._hands):
                 try:
@@ -159,6 +164,19 @@ def get_context(user_id: str) -> UserContext:
     for c in stale:          # free the models outside the registry lock
         c.close()
     return ctx
+
+
+def close_all(reason: str = "server_shutdown") -> None:
+    """Server is stopping: save every recording still in memory, then free the models."""
+    with _registry_lock:
+        contexts = list(_contexts.values())
+        _contexts.clear()
+    for c in contexts:
+        try:
+            c.recorder.stop(reason)
+        except Exception as exc:
+            print(f"Keypoints: shutdown save failed for {c.user_id}: {exc}")
+        c.close()
 
 
 def any_camera_active() -> bool:

@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 
 from fastapi import Depends, FastAPI
@@ -10,12 +11,15 @@ from models import Patient, SessionModel, JointAngle, Setting
 from config import MEDIAPIPE_READY  # for /api/health mediapipe_ready flag
 from services import mjpeg_camera
 
-from routers import admin, analytics, auth, camera, dashboard, export, pages, patients, reports, sessions, tickets
+from routers import admin, analytics, auth, camera, dashboard, export, labels, pages, patients, recordings, reports, sessions, tickets
 from registration_otp.routes import router as registration_otp_router
 from services.app_config import app_settings
 from services.auth.bootstrap import seed_admin
 from services.auth.deps import require_clinical
 from services.export_auth import require_export_key
+from services import user_context
+from services.keypoints import lifecycle as keypoint_lifecycle
+from fastapi.concurrency import run_in_threadpool
 
 init_db()  # creates all tables (and the MySQL database itself, if missing)
 seed_admin()  # first admin from .env, only if no admin exists yet
@@ -44,6 +48,8 @@ app.include_router(admin.router)
 app.include_router(pages.router)
 app.include_router(patients.router,  dependencies=clinical)
 app.include_router(sessions.router,  dependencies=clinical)
+app.include_router(recordings.router, dependencies=clinical)
+app.include_router(labels.router,     dependencies=clinical)
 app.include_router(dashboard.router, dependencies=clinical)
 app.include_router(analytics.router, dependencies=clinical)
 app.include_router(reports.router,   dependencies=clinical)
@@ -51,6 +57,44 @@ app.include_router(camera.router,    dependencies=clinical)
 app.include_router(camera.ws_router)   # /ws/camera does its own cookie auth (WebSocket)
 app.include_router(tickets.router,   dependencies=clinical)
 app.include_router(export.router,    dependencies=[Depends(require_export_key)])
+
+
+@app.on_event("startup")
+async def recover_keypoint_checkpoints():
+    """A crash/kill can leave checkpoint files of recordings that never finished."""
+    try:
+        await run_in_threadpool(keypoint_lifecycle.recover_after_restart)
+    except Exception as exc:      # recovery problems must never stop the app from starting
+        print(f"Keypoints recovery failed: {exc}")
+
+
+_PURGE_EVERY_SECONDS = 3600
+
+
+async def _keypoint_housekeeping_loop():
+    """Deletes recordings of never-saved sessions once they pass KEYPOINT_UNLINKED_TTL_HOURS."""
+    while True:
+        try:
+            await run_in_threadpool(keypoint_lifecycle.purge_abandoned)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # housekeeping must never take the app down
+            print(f"Keypoints housekeeping failed: {exc}")
+        await asyncio.sleep(_PURGE_EVERY_SECONDS)
+
+
+@app.on_event("startup")
+async def start_keypoint_housekeeping():
+    # registered after recover_keypoint_checkpoints, so crash recovery always runs first
+    app.state.keypoint_housekeeping = asyncio.create_task(_keypoint_housekeeping_loop())
+
+
+@app.on_event("shutdown")
+async def save_open_recordings():
+    task = getattr(app.state, "keypoint_housekeeping", None)
+    if task is not None:
+        task.cancel()
+    await run_in_threadpool(user_context.close_all)
 
 
 #Startup seed

@@ -280,6 +280,7 @@ class BalloonPopEngine:
                 "settings": dict(self.cfg),
                 "calibrated": self.state == "PLAY",
                 "events": reps,         # per-rep log, one dict per popped balloon
+                "miss_log": list(self.miss_log),   # one dict per missed balloon
             }
 
     # ---- per-frame entry point -------------------------------------------
@@ -356,6 +357,8 @@ class BalloonPopEngine:
         # play
         self.balloons: Dict[str, _Balloon] = {}
         self.rep_log: list = []
+        self.miss_log: list = []      # one dict per missed balloon (kept apart from rep_log, which counts pops)
+        self.attempt_n = 0            # running number over pops AND misses, so the report keeps their order
         self.misses = 0
         self.lean_events = 0
         self.rest_t = 0.0
@@ -544,6 +547,12 @@ class BalloonPopEngine:
                 del self.balloons[side]
             elif b.age >= self.cfg["timeout"]:
                 self.misses += 1
+                self.attempt_n += 1
+                self.miss_log.append(dict(
+                    n=self.attempt_n, side=b.side, plane=b.plane, level=b.level,
+                    target=round(b.target, 1),
+                    peak=round(b.peaks.get(b.side, max(b.peaks.values(), default=0.0)), 1),
+                    time_to_pop=round(b.age, 2), lean_events=b.lean_events))
                 b.gone = FLOAT_AWAY_S
         if not self.balloons:
             ok_rest = all(m.elev < REST_ANGLE + 5 for m in self.ms.values())
@@ -556,7 +565,8 @@ class BalloonPopEngine:
 
     def _pop(self, b: _Balloon):
         side = b.popper or b.side
-        rep = dict(id=len(self.rep_log) + 1, side=side, plane=b.plane, level=b.level,
+        self.attempt_n += 1
+        rep = dict(id=len(self.rep_log) + 1, n=self.attempt_n, side=side, plane=b.plane, level=b.level,
                    target=round(b.target, 1), peak=round(b.peaks.get(side, 0.0), 1),
                    time_to_pop=round(b.age, 2), lean_events=b.lean_events)
         self.rep_log.append(rep)
